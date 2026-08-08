@@ -42,13 +42,21 @@
 
 ## 第一阶段验收结果
 
-- 已验证实现 commit：`b4ed737`（本工作记录更新会产生后续文档 commit）。
+- 第一阶段实现与验收 commit：`4af173c5d439e23370e48ed1510c3d3ef59090c6`（本段审计记录会产生一个后续文档 commit）。
 - Python `3.8.20`、PyTorch `1.13.1`、torchvision `0.14.1`、OpenCV `4.6.0`。
 - CPU import：PDDP、SketchInpainter `make_sketch_from_edge` 和适配数据集全部通过；验证时 `CUDA_VISIBLE_DEVICES` 为空，`torch.cuda.is_available() == false`。
 - 单元测试：`8 passed`，包括实际 SketchInpainter sketch 构造和默认 DataLoader collate。
 - manifest dry-run：ArtBench train `51,300`、Mural1 train `1,664`，合计 `52,964`；稳定哈希 train/validation 为 `52,407/557`；未写正式 manifest。
 - canonical 推理 dry-run：`702` 条、`351` 个唯一源图、ArtBench/COCO/Mural1=`300/300/102`、两轮各 `351`、缺失或无效输入 `0`；未加载 checkpoint。
 - 本阶段未生成 MuGE edge、未生成 VQ token、未加载上传权重、未执行 forward、训练或正式推理。
+- Conda 环境占用约 `9.4G`；安装日志：`/home/zwz_42312/PDDPoutputs/setup/conda_create.log`。
+
+关键文件 SHA-256：
+
+- `environment.server.yml`：`6f5dbec8401a7f881f585334c03106139a719fbec842030c6730f42da4083a70`
+- `configs/sketchinpainter_finetune.yaml`：`fa4ea31d802d2907399256adab1d6491e315fb97bf5c139720bf473057a2a7ad`
+- `scripts/sketchinpainter/batch_inference.py`：`a01e50e24b10eeecf69492a92fc9b933b25a32bc5edc08cba5e79a1a9578a93f`
+- `scripts/sketchinpainter/build_manifest.py`：`dd7cd94d2650aef5518714fb68be6f7b3f2416603b8dbb4019d453a24f883d5e`
 
 ## 已处理问题
 
