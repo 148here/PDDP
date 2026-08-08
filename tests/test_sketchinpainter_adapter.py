@@ -9,9 +9,10 @@ from image_synthesis.data.sketchinpainter_dataset import (
     crop_and_pad_sketch,
     load_hole_mask,
     load_jsonl,
+    load_vq_tokens,
     stable_seed,
 )
-from scripts.sketchinpainter.build_manifest import stable_split
+from scripts.sketchinpainter.build_manifest import stable_split, training_root
 
 
 def test_stable_seed_is_repeatable_and_sensitive():
@@ -44,7 +45,8 @@ def test_crop_and_pad_sketch_keeps_only_hole_lines():
     result = crop_and_pad_sketch(sketch, hole, output_size=224, bbox_scale=1.2)
     assert result.shape == (224, 224, 3)
     assert result.dtype == np.uint8
-    assert result.min() == 0
+    # Bilinear upsampling may antialias a one-pixel black line.
+    assert result.min() <= 64
     assert np.all(result[:, 0] == 255)
 
 
@@ -60,3 +62,23 @@ def test_validation_split_is_deterministic():
     values = [stable_split(f"sample:{index}", 1.0) for index in range(10000)]
     assert values == [stable_split(f"sample:{index}", 1.0) for index in range(10000)]
     assert 50 <= values.count("validation") <= 150
+
+
+def test_training_root_excludes_sibling_test_split(tmp_path: Path):
+    (tmp_path / "train").mkdir()
+    (tmp_path / "test").mkdir()
+    assert training_root(tmp_path) == tmp_path / "train"
+
+
+def test_vq_token_cache_schema_and_corruption(tmp_path: Path):
+    valid = tmp_path / "valid.npy"
+    invalid = tmp_path / "invalid.npy"
+    corrupt = tmp_path / "corrupt.npy"
+    np.save(valid, np.arange(1024, dtype=np.int64), allow_pickle=False)
+    np.save(invalid, np.arange(10, dtype=np.int64), allow_pickle=False)
+    corrupt.write_bytes(b"not a numpy file")
+    assert load_vq_tokens(valid).shape == (1024,)
+    with pytest.raises(ValueError, match="Expected 1024"):
+        load_vq_tokens(invalid)
+    with pytest.raises(ValueError, match="Invalid VQ token cache"):
+        load_vq_tokens(corrupt)

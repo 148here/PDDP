@@ -51,6 +51,19 @@ def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
+def load_vq_tokens(path: str | Path, expected_count: int = 1024) -> np.ndarray:
+    try:
+        tokens = np.load(path, allow_pickle=False)
+    except Exception as error:
+        raise ValueError(f"Invalid VQ token cache: {path}") from error
+    tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
+    if tokens.size != expected_count:
+        raise ValueError(f"Expected {expected_count} VQ tokens in {path}, got {tokens.size}")
+    if tokens.min(initial=0) < 0:
+        raise ValueError(f"VQ token cache contains negative indices: {path}")
+    return tokens
+
+
 def _read_gray(path: str | Path) -> np.ndarray:
     value = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
     if value is None:
@@ -216,10 +229,7 @@ class SketchInpainterPDDPDataset(Dataset):
             **self.sketch_overrides,
         )
         pddp_sketch = crop_and_pad_sketch(sketch, mask, output_size=self.sketch_size[0], bbox_scale=self.bbox_scale)
-        tokens = np.load(row["token_path"], allow_pickle=False)
-        tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
-        if tokens.size != 1024:
-            raise ValueError(f"Expected 1024 VQ tokens for {row['sample_id']}, got {tokens.size}")
+        tokens = load_vq_tokens(row["token_path"])
         return {
             "image": np.asarray(image, dtype=np.float32).transpose(2, 0, 1),
             "obj_mask": mask.astype(np.float32),

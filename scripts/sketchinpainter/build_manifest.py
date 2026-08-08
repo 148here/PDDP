@@ -38,6 +38,11 @@ def build_rows(dataset: str, root: Path, output_root: Path, validation_percent: 
         }
 
 
+def training_root(root: Path) -> Path:
+    candidate = root / "train"
+    return candidate if candidate.is_dir() else root
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--artbench-root", type=Path, required=True)
@@ -53,9 +58,10 @@ def main() -> None:
     for name, root in roots.items():
         if not root.is_dir():
             raise FileNotFoundError(f"Missing {name} root: {root}")
+    scan_roots = {name: training_root(root) for name, root in roots.items()}
     rows = [
-        *build_rows("artbench", roots["artbench"], args.output_root, args.validation_percent),
-        *build_rows("mural1", roots["mural1"], args.output_root, args.validation_percent),
+        *build_rows("artbench", scan_roots["artbench"], args.output_root, args.validation_percent),
+        *build_rows("mural1", scan_roots["mural1"], args.output_root, args.validation_percent),
     ]
     ids = [row["sample_id"] for row in rows]
     if len(ids) != len(set(ids)):
@@ -63,6 +69,7 @@ def main() -> None:
     summary = {
         "total": len(rows),
         "datasets": {name: sum(row["dataset"] == name for row in rows) for name in roots},
+        "scan_roots": {name: str(path) for name, path in scan_roots.items()},
         "splits": {split: sum(row["split"] == split for row in rows) for split in ("train", "validation")},
         "manifest": str(args.manifest.resolve()),
         "written": not args.dry_run,
