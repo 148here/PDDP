@@ -5,6 +5,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
+from torch.utils.data import DataLoader
 
 from image_synthesis.data.sketchinpainter_dataset import (
     crop_and_pad_sketch,
@@ -128,3 +129,8 @@ def test_real_sketchinpainter_adapter_shapes_and_reproducibility(tmp_path: Path)
     assert first["condition_seed"] == second["condition_seed"]
     assert np.array_equal(first["obj_mask"], second["obj_mask"])
     assert np.array_equal(first["sketch"], second["sketch"])
+    batch = next(iter(DataLoader(dataset, batch_size=1, num_workers=0)))
+    assert tuple(batch["image"].shape) == (1, 3, 256, 256)
+    assert tuple(batch["obj_mask"].shape) == (1, 256, 256)
+    assert tuple(batch["sketch"].shape) == (1, 3, 224, 224)
+    assert tuple(batch["quantized_image"].shape) == (1, 1024)

@@ -1,6 +1,6 @@
 # PDDP × SketchInpainter 适配工作记录
 
-最后更新：2026-08-08
+最后更新：2026-08-08（第一阶段验收完成）
 
 ## 固定目标与路径
 
@@ -36,7 +36,26 @@
 | DONE | 新增 SketchInpainter Stage2 mask/sketch 训练适配器 |
 | DONE | 新增单 GPU 微调配置和启动脚本，支持 checkpoint resume 参数透传 |
 | DONE | 新增 canonical 702 条批量推理脚本，支持 dry-run、哈希审计与缺失续跑 |
-| TODO | 等代码提交后，在本表追加最终 commit、环境验证结果与服务器 SHA-256 |
+| DONE | 创建独立 Conda 环境并完成 CPU-only import 验证 |
+| DONE | 完成真实 SketchInpainter 数据路径、DataLoader、cache schema 和确定性单元测试 |
+| DONE | 完成训练集 manifest scan 与 canonical 702 条推理 dry-run |
+
+## 第一阶段验收结果
+
+- 已验证实现 commit：`b4ed737`（本工作记录更新会产生后续文档 commit）。
+- Python `3.8.20`、PyTorch `1.13.1`、torchvision `0.14.1`、OpenCV `4.6.0`。
+- CPU import：PDDP、SketchInpainter `make_sketch_from_edge` 和适配数据集全部通过；验证时 `CUDA_VISIBLE_DEVICES` 为空，`torch.cuda.is_available() == false`。
+- 单元测试：`8 passed`，包括实际 SketchInpainter sketch 构造和默认 DataLoader collate。
+- manifest dry-run：ArtBench train `51,300`、Mural1 train `1,664`，合计 `52,964`；稳定哈希 train/validation 为 `52,407/557`；未写正式 manifest。
+- canonical 推理 dry-run：`702` 条、`351` 个唯一源图、ArtBench/COCO/Mural1=`300/300/102`、两轮各 `351`、缺失或无效输入 `0`；未加载 checkpoint。
+- 本阶段未生成 MuGE edge、未生成 VQ token、未加载上传权重、未执行 forward、训练或正式推理。
+
+## 已处理问题
+
+- 原环境文件同时包含 CUDA 11.6 与 cudatoolkit 10.2；已改为最小 CUDA 11.6 runtime 环境。
+- Conda 首次求解把 defaults Pillow 与 conda-forge libtiff 混装，造成 `libtiff.so.5` 缺失；环境清单已将 Pillow/libtiff 同时 pin 到 defaults ABI，CPU import 复验通过。
+- 首次递归 manifest scan 将 Mural1 test 的 51 张图纳入；现已强制优先扫描数据根的 `train/`，复验为 Mural1 `1,664`。
+- mask 数量可为 1 或 2 时，变长 rotation tensor 会破坏默认 collate；已改为审计字符串并通过 DataLoader 测试。
 
 ## 当前权重状态
 
