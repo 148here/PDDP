@@ -123,3 +123,11 @@ CHECKPOINT=/path/to/final.pth conda run -p /home/zwz_42312/conda_envs/pddp_sketc
 - 初始实现 commit：`66826cb8628adf064f2d3d59e5a66c3580e36674`；预处理 batch 提升 commit：`8f4fd13`。
 - 训练输出：`/home/zwz_42312/PDDPoutputs/train/sketchinpainter_finetune/`。
 - 当前仅有预处理吞吐，尚无真实 forward/backward 速度；正式总步数将在 pilot 日志得到稳定 step time 和峰值显存后确定。
+
+### Pilot 结果与一轮正式微调
+
+- Pilot 已正常完成 `500/500` step；稳定 forward/backward 约 `0.4–0.5 s/step`，包含数据抖动和 checkpoint 写入后的平均约 `0.6 s/step`。
+- Pilot 暴露官方 scratch scheduler 会在前 1000 step 将学习率从 `4e-6` 拉升到 `2e-4`；第 500 step 已约为 `1e-4`，不适合继续作为保守微调。
+- 正式一轮从原始 PDDP checkpoint 重新初始化，使用固定 `4e-6`，不沿用 pilot optimizer/model 更新；目标为 `6364` step（一个有效 epoch）。
+- 每 1000 step 原子覆盖同一个 `checkpoint/last.pth`，结束时强制覆盖最终权重；仍只保留一个训练 checkpoint。
+- 正式 screen：`pddp_finetune_fullsketch_one_epoch_v1`；日志：`/home/zwz_42312/PDDPoutputs/train_control/formal_screen.log`。
