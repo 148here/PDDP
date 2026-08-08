@@ -111,3 +111,15 @@ CHECKPOINT=/path/to/final.pth conda run -p /home/zwz_42312/conda_envs/pddp_sketc
 - contact sheet SHA-256：`7d3ad17a691918737f38838a78033610788c45eae6838530fb90a1994a94fe6b`。
 - 初步人工结论：权重和推理链路可用，输出有结构、有限且非近常量；但预训练质量不足以作为最终结果。COCO-Hard 有严重人物/肢体语义错误，ArtBench-Hard 与 Mural 样本存在接缝或局部色彩/内容偏差。正式预处理和微调前须等待人工许可。
 - 恢复记录：首次 screen 在加载模型前因最小环境缺少上游 CLIP tokenizer 依赖而停止；补装并固化 `ftfy==6.1.1`、`regex==2022.8.17` 后，在同名 detached screen 中成功重跑。
+
+## 2026-08-08 完整 sketch 微调 pilot
+
+- 状态：`IN PROGRESS`；detached screen 为 `pddp_finetune_fullsketch_pilot_v1`。
+- screen 日志：`/home/zwz_42312/PDDPoutputs/train_control/pilot_screen.log`。
+- 协议：保留完整 canonical/训练 sketch，仅转换到 `224×224`；不再截取 hole 内线条或构造 bbox；原 free-form mask 直接作为 `obj_mask`。
+- 数据：ArtBench/Mural1 共 `52,964` 张，稳定划分 train/validation 为 `52,407/557`。
+- 流水线：manifest → MuGE batch 32 → VQ batch 32 → 单 GPU AMP 微调，所有阶段支持缓存续跑。
+- pilot：真实 batch size `8`、gradient accumulation `1`、最多 `500` optimizer steps，每 `250` step 原子覆盖同一个 `checkpoint/last.pth`，不保留按 epoch 命名的历史权重。
+- 初始实现 commit：`66826cb8628adf064f2d3d59e5a66c3580e36674`；预处理 batch 提升 commit：`8f4fd13`。
+- 训练输出：`/home/zwz_42312/PDDPoutputs/train/sketchinpainter_finetune/`。
+- 当前仅有预处理吞吐，尚无真实 forward/backward 速度；正式总步数将在 pilot 日志得到稳定 step time 和峰值显存后确定。
