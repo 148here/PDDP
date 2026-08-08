@@ -10,12 +10,17 @@ import hashlib
 import json
 import os
 import random
+import sys
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
 from PIL import Image
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from image_synthesis.data.sketchinpainter_dataset import crop_and_pad_sketch, sha256_file
 

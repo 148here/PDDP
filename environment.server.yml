@@ -6,7 +6,10 @@ dependencies:
   - torchvision=0.14.1
   - pytorch-cuda=11.6
   - numpy=1.23.5
-  - pillow=9.3.0
+  # Pillow's defaults build links libtiff.so.5; keep both from defaults to
+  # prevent an ABI-mismatched conda-forge libtiff.so.6 from being selected.
+  - defaults::libtiff=4.5.0
+  - defaults::pillow=9.3.0
   - pyyaml=6.0
   - pip
   - pip:
