@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 
 def rows(path: Path):
@@ -26,6 +27,7 @@ def main() -> None:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--execute", action="store_true", help="actually load MuGE and write edges")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--batch-size", type=int, default=1)
     args = parser.parse_args()
     manifest_rows = list(rows(args.manifest))
     missing = [row for row in manifest_rows if not Path(row["edge_path"]).is_file()]
@@ -40,20 +42,32 @@ def main() -> None:
     extractor = get_muge_extractor(
         source_root=str(args.muge_source_root), checkpoint_path=str(args.muge_checkpoint), device=args.device
     )
-    for index, row in enumerate(manifest_rows, 1):
-        output = Path(row["edge_path"])
-        if args.resume and output.is_file():
-            continue
-        image = cv2.imread(row["image_path"], cv2.IMREAD_COLOR)
-        if image is None:
-            raise ValueError(f"Failed to read {row['image_path']}")
-        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        edge = extractor.extract(rgb, alpha=1.0, inference_seed=42, line_polarity="black_on_white")
-        output.parent.mkdir(parents=True, exist_ok=True)
-        if not cv2.imwrite(str(output), edge):
-            raise OSError(f"Failed to write {output}")
-        if index % 100 == 0:
-            print(f"{index}/{len(manifest_rows)}")
+    if args.batch_size <= 0:
+        raise ValueError("batch-size must be positive")
+    pending = [row for row in manifest_rows if not (args.resume and Path(row["edge_path"]).is_file())]
+    completed = len(manifest_rows) - len(pending)
+    for start in range(0, len(pending), args.batch_size):
+        chunk = pending[start:start + args.batch_size]
+        grouped: dict[tuple[int, ...], list[tuple[dict, np.ndarray]]] = {}
+        for row in chunk:
+            image = cv2.imread(row["image_path"], cv2.IMREAD_COLOR)
+            if image is None:
+                raise ValueError(f"Failed to read {row['image_path']}")
+            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            grouped.setdefault(tuple(rgb.shape), []).append((row, rgb))
+        for values in grouped.values():
+            batch = np.stack([rgb for _, rgb in values], axis=0)
+            edges = extractor.extract_batch(
+                batch, alpha=1.0, inference_seed=42, line_polarity="black_on_white"
+            )
+            for (row, _), edge in zip(values, edges):
+                output = Path(row["edge_path"])
+                output.parent.mkdir(parents=True, exist_ok=True)
+                if not cv2.imwrite(str(output), edge):
+                    raise OSError(f"Failed to write {output}")
+        completed += len(chunk)
+        if completed % 100 < len(chunk) or completed == len(manifest_rows):
+            print(f"{completed}/{len(manifest_rows)}", flush=True)
 
 
 if __name__ == "__main__":

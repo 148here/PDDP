@@ -23,7 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from image_synthesis.data.sketchinpainter_dataset import crop_and_pad_sketch, sha256_file
+from image_synthesis.data.sketchinpainter_dataset import resize_full_sketch, sha256_file
 
 
 def load_conditions(path: Path) -> list[dict[str, Any]]:
@@ -204,7 +204,7 @@ def run_one(model, torch, row: dict[str, Any], output_root: Path, device: str, t
     if sketch is None:
         raise ValueError(f"Failed to read {sketch_path}")
     sketch = cv2.resize(sketch, (256, 256), interpolation=cv2.INTER_LINEAR)
-    pddp_sketch = crop_and_pad_sketch(sketch, mask_256, output_size=224, bbox_scale=1.2)
+    pddp_sketch = resize_full_sketch(sketch, output_size=224)
     image_256 = np.asarray(gt_image.resize((256, 256), Image.Resampling.BICUBIC), dtype=np.float32).copy()
     image_tensor = torch.from_numpy(image_256).permute(2, 0, 1).unsqueeze(0).to(device)
     with torch.no_grad():

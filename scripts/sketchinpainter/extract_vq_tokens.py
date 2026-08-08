@@ -21,6 +21,7 @@ def main() -> None:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--batch-size", type=int, default=1)
     args = parser.parse_args()
     with args.manifest.open("r", encoding="utf-8") as handle:
         rows = [json.loads(line) for line in handle if line.strip()]
@@ -38,20 +39,31 @@ def main() -> None:
     codec = TamingGumbelVQVAE(
         config_path=str(args.vq_config), ckpt_path=str(args.vq_checkpoint), mapping_path=str(args.mapping)
     ).to(args.device).eval()
-    for index, row in enumerate(rows, 1):
-        output = Path(row["token_path"])
-        if args.resume and output.is_file():
-            continue
-        image = Image.open(row["image_path"]).convert("RGB").resize((256, 256), Image.Resampling.BICUBIC)
-        tensor = torch.from_numpy(np.asarray(image, dtype=np.float32).copy()).permute(2, 0, 1).unsqueeze(0).to(args.device)
+    if args.batch_size <= 0:
+        raise ValueError("batch-size must be positive")
+    pending = [row for row in rows if not (args.resume and Path(row["token_path"]).is_file())]
+    completed = len(rows) - len(pending)
+    for start in range(0, len(pending), args.batch_size):
+        chunk = pending[start:start + args.batch_size]
+        images = [
+            np.asarray(
+                Image.open(row["image_path"]).convert("RGB").resize((256, 256), Image.Resampling.BICUBIC),
+                dtype=np.float32,
+            ).copy()
+            for row in chunk
+        ]
+        tensor = torch.from_numpy(np.stack(images)).permute(0, 3, 1, 2).to(args.device)
         with torch.no_grad():
-            tokens = codec.get_tokens(tensor)["token"].reshape(-1).cpu().numpy().astype(np.int64)
-        if tokens.size != 1024:
-            raise ValueError(f"Expected 1024 tokens for {row['sample_id']}, got {tokens.size}")
-        output.parent.mkdir(parents=True, exist_ok=True)
-        np.save(output, tokens, allow_pickle=False)
-        if index % 100 == 0:
-            print(f"{index}/{len(rows)}")
+            tokens = codec.get_tokens(tensor)["token"].reshape(len(chunk), -1).cpu().numpy().astype(np.int64)
+        if tokens.shape[1] != 1024:
+            raise ValueError(f"Expected 1024 tokens per sample, got {tokens.shape}")
+        for row, item_tokens in zip(chunk, tokens):
+            output = Path(row["token_path"])
+            output.parent.mkdir(parents=True, exist_ok=True)
+            np.save(output, item_tokens, allow_pickle=False)
+        completed += len(chunk)
+        if completed % 100 < len(chunk) or completed == len(rows):
+            print(f"{completed}/{len(rows)}", flush=True)
 
 
 if __name__ == "__main__":

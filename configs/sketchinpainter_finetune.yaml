@@ -65,11 +65,14 @@ solver:
   base_lr: 4.0e-6
   adjust_lr: none
   max_epochs: 250
+  max_iterations: 500
+  save_iterations: 250
+  keep_only_last_checkpoint: true
   save_epochs: 2
-  validation_epochs: 5
-  sample_iterations: 5000
+  validation_epochs: 1000000
+  sample_iterations: -1
   print_specific_things: true
-  accumulate_grad_iters: 2
+  accumulate_grad_iters: 1
   ema: {decay: 0.99, update_interval: 25, device: cpu}
   clip_grad_norm:
     target: image_synthesis.engine.clip_grad_norm.ClipGradNorm
@@ -86,8 +89,8 @@ solver:
 
 dataloader:
   data_root: ''
-  batch_size: 4
-  num_workers: 4
+  batch_size: 8
+  num_workers: 8
   persistent_workers: true
   train_datasets:
     - target: image_synthesis.data.sketchinpainter_dataset.SketchInpainterPDDPDataset
@@ -103,6 +106,7 @@ dataloader:
         image_size: [256, 256]
         sketch_size: [224, 224]
         bbox_scale: 1.2
+        sketch_scope: full
         sketch_overrides:
           sigma_mean: 9.1
           sigma_std: 1.82

@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader
 
 from image_synthesis.data.sketchinpainter_dataset import (
     crop_and_pad_sketch,
+    resize_full_sketch,
     load_hole_mask,
     load_jsonl,
     load_vq_tokens,
@@ -51,6 +52,17 @@ def test_crop_and_pad_sketch_keeps_only_hole_lines():
     # Bilinear upsampling may antialias a one-pixel black line.
     assert result.min() <= 64
     assert np.all(result[:, 0] == 255)
+
+
+def test_resize_full_sketch_preserves_lines_outside_hole_semantics():
+    sketch = np.full((256, 256), 255, dtype=np.uint8)
+    sketch[10:245, 10] = 0
+    sketch[100:150, 120] = 0
+    result = resize_full_sketch(sketch, output_size=224)
+    assert result.shape == (224, 224, 3)
+    assert result.dtype == np.uint8
+    assert result[:, :12].min() < 128
+    assert result[:, 90:120].min() < 128
 
 
 def test_duplicate_manifest_id_is_rejected(tmp_path: Path):

@@ -129,6 +129,15 @@ def crop_and_pad_sketch(
     return cv2.cvtColor(canvas, cv2.COLOR_GRAY2RGB)
 
 
+def resize_full_sketch(sketch: np.ndarray, *, output_size: int = 224) -> np.ndarray:
+    """Preserve the complete canonical sketch and only satisfy PDDP's input size."""
+    if sketch.ndim == 3:
+        sketch = cv2.cvtColor(sketch, cv2.COLOR_BGR2GRAY)
+    interpolation = cv2.INTER_AREA if max(sketch.shape) > output_size else cv2.INTER_LINEAR
+    resized = cv2.resize(sketch, (output_size, output_size), interpolation=interpolation)
+    return cv2.cvtColor(resized, cv2.COLOR_GRAY2RGB)
+
+
 class SketchInpainterPDDPDataset(Dataset):
     """Dataset backed by a collision-safe JSONL manifest and per-image tokens."""
 
@@ -146,6 +155,7 @@ class SketchInpainterPDDPDataset(Dataset):
         image_size: list[int] | tuple[int, int] = (256, 256),
         sketch_size: list[int] | tuple[int, int] = (224, 224),
         bbox_scale: float = 1.2,
+        sketch_scope: str = "full",
         sketch_overrides: dict[str, Any] | None = None,
         validate_files: bool = True,
         **_: Any,
@@ -166,6 +176,9 @@ class SketchInpainterPDDPDataset(Dataset):
         self.image_size = tuple(int(value) for value in image_size)
         self.sketch_size = tuple(int(value) for value in sketch_size)
         self.bbox_scale = float(bbox_scale)
+        self.sketch_scope = str(sketch_scope).strip().lower()
+        if self.sketch_scope not in {"full", "hole_crop"}:
+            raise ValueError("sketch_scope must be 'full' or 'hole_crop'")
         self.weights = {"artbench": 1.0, "mural1": 0.1, **(dataset_weights or {})}
         self.mask_count_probs = {int(key): float(value) for key, value in (mask_count_probs or {1: 0.5, 2: 0.5}).items()}
         self.random_mask_rotate_90 = bool(random_mask_rotate_90)
@@ -228,7 +241,12 @@ class SketchInpainterPDDPDataset(Dataset):
             boundary_pin_px=12.0,
             **self.sketch_overrides,
         )
-        pddp_sketch = crop_and_pad_sketch(sketch, mask, output_size=self.sketch_size[0], bbox_scale=self.bbox_scale)
+        if self.sketch_scope == "full":
+            pddp_sketch = resize_full_sketch(sketch, output_size=self.sketch_size[0])
+        else:
+            pddp_sketch = crop_and_pad_sketch(
+                sketch, mask, output_size=self.sketch_size[0], bbox_scale=self.bbox_scale
+            )
         tokens = load_vq_tokens(row["token_path"])
         return {
             "image": np.asarray(image, dtype=np.float32).transpose(2, 0, 1),

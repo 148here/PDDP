@@ -45,6 +45,9 @@ class Solver(object):
         self.max_epochs = config['solver']['max_epochs']
         self.save_epochs = config['solver']['save_epochs']
         self.save_iterations = config['solver'].get('save_iterations', -1)
+        self.keep_only_last_checkpoint = bool(config['solver'].get('keep_only_last_checkpoint', False))
+        self.max_iterations = int(config['solver'].get('max_iterations', -1))
+        self.last_saved_iter = None
         self.sample_iterations = config['solver']['sample_iterations']
         if self.sample_iterations == 'epoch':
             self.sample_iterations = self.dataloader['train_iterations']
@@ -314,6 +317,8 @@ class Solver(object):
 
     def save(self, force=False):
         if is_primary():
+            if force and self.last_saved_iter == self.last_iter:
+                return
             # save with the epoch specified name
             if self.save_iterations > 0:
                 if (self.last_iter + 1) % self.save_iterations == 0:
@@ -352,14 +357,17 @@ class Solver(object):
 
                 state_dict['optimizer_and_scheduler'] = optimizer_and_scheduler
             
-                if save:
+                if save and not self.keep_only_last_checkpoint:
                     save_path = os.path.join(self.ckpt_dir, '{}e_{}iter.pth'.format(str(self.last_epoch).zfill(6), self.last_iter))
                     torch.save(state_dict, save_path)
                     self.logger.log_info('saved in {}'.format(save_path))    
                 
                 # save with the last name
                 save_path = os.path.join(self.ckpt_dir, 'last.pth')
-                torch.save(state_dict, save_path)  
+                temporary_path = save_path + '.tmp'
+                torch.save(state_dict, temporary_path)
+                os.replace(temporary_path, save_path)
+                self.last_saved_iter = self.last_iter
                 self.logger.log_info('saved in {}'.format(save_path))    
         
     def resume(self, 
@@ -494,9 +502,14 @@ class Solver(object):
                 self.sample(batch, phase='train', step_type='iteration')
                 self.model.train()
 
+            self.save()
+            if self.max_iterations > 0 and (self.last_iter + 1) >= self.max_iterations:
+                break
+
         # modify here to make sure dataloader['train_iterations'] is correct
         assert itr >= 0, "The data is too less to form one iteration!"
-        self.dataloader['train_iterations'] = itr + 1
+        if self.max_iterations <= 0 or (self.last_iter + 1) < self.max_iterations:
+            self.dataloader['train_iterations'] = itr + 1
 
     def validate_epoch(self):
         if 'validation_loader' not in self.dataloader:
@@ -576,5 +589,8 @@ class Solver(object):
         for epoch in range(start_epoch, self.max_epochs):
             self.train_epoch()
             self.save(force=True)
+            if self.max_iterations > 0 and (self.last_iter + 1) >= self.max_iterations:
+                self.logger.log_info('Reached max_iterations={}'.format(self.max_iterations))
+                break
             self.validate_epoch()
 
