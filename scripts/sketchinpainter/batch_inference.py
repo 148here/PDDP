@@ -6,6 +6,7 @@ Without --execute this command only validates and reports the canonical plan.
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
 import os
@@ -51,6 +52,79 @@ def safe_id(condition_id: str) -> str:
     return hashlib.sha256(condition_id.encode("utf-8")).hexdigest()[:24]
 
 
+def read_condition_ids(path: Path) -> list[str]:
+    values = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if len(values) != len(set(values)):
+        raise ValueError(f"Duplicate condition IDs in {path}")
+    return values
+
+
+def core_key_mismatches(keys: list[str]) -> list[str]:
+    """Ignore only VQ parameters supplied by the separately audited VQ checkpoint."""
+    return [key for key in keys if not key.startswith("content_codec.vq.")]
+
+
+def raw_image_stats(value: np.ndarray) -> dict[str, Any]:
+    array = np.asarray(value, dtype=np.float32)
+    finite = bool(np.isfinite(array).all())
+    safe = np.nan_to_num(array, nan=0.0, posinf=255.0, neginf=0.0)
+    clipped = np.clip(safe, 0, 255).astype(np.uint8)
+    near_black = float((clipped <= 5).mean())
+    near_white = float((clipped >= 250).mean())
+    std = float(safe.std())
+    return {
+        "finite": finite,
+        "min": float(safe.min()),
+        "max": float(safe.max()),
+        "mean": float(safe.mean()),
+        "std": std,
+        "near_black_ratio": near_black,
+        "near_white_ratio": near_white,
+        "near_constant": std < 2.0,
+        "near_all_black": near_black > 0.98,
+        "near_all_white": near_white > 0.98,
+    }
+
+
+def json_scalar(value: Any) -> Any:
+    """Convert scalar checkpoint metadata to a JSON-safe value."""
+    if hasattr(value, "item") and callable(value.item):
+        try:
+            return value.item()
+        except (RuntimeError, ValueError):
+            pass
+    return value
+
+
+def apply_checkpoint_weights(model: Any, state: dict[str, Any]) -> dict[str, Any]:
+    """Load base modules then overwrite the transformer with its EMA weights."""
+    model_state = state.get("model", state)
+    missing, unexpected = model.load_state_dict(model_state, strict=False)
+    critical_missing = core_key_mismatches(list(missing))
+    critical_unexpected = core_key_mismatches(list(unexpected))
+    ema_missing: list[str] = []
+    ema_unexpected: list[str] = []
+    ema_applied = False
+    if "ema" in state:
+        ema_missing, ema_unexpected = model.get_ema_model().load_state_dict(state["ema"], strict=False)
+        ema_applied = True
+    result = {
+        "model_missing_keys": list(missing),
+        "model_unexpected_keys": list(unexpected),
+        "critical_model_missing_keys": critical_missing,
+        "critical_model_unexpected_keys": critical_unexpected,
+        "ema_present": "ema" in state,
+        "ema_applied": ema_applied,
+        "ema_missing_keys": list(ema_missing),
+        "ema_unexpected_keys": list(ema_unexpected),
+    }
+    if critical_missing or critical_unexpected:
+        raise RuntimeError("PDDP checkpoint has critical model key mismatches")
+    if not ema_applied or ema_missing or ema_unexpected:
+        raise RuntimeError("PDDP EMA weights are absent or incompatible")
+    return result
+
+
 def validate(rows: list[dict[str, Any]], output_root: Path, verify_hashes: bool) -> dict[str, Any]:
     datasets: dict[str, int] = {}
     rounds: dict[str, int] = {}
@@ -88,14 +162,28 @@ def load_model(config_path: Path, checkpoint: Path, device: str):
 
     config = load_yaml_config(str(config_path))
     model = build_model(config)
+    vq_checkpoint = Path(config["model"]["params"]["content_codec_config"]["params"]["ckpt_path"])
+    if not vq_checkpoint.is_file():
+        raise FileNotFoundError(vq_checkpoint)
     state = torch.load(checkpoint, map_location="cpu")
-    model_state = state.get("model", state)
-    missing, unexpected = model.load_state_dict(model_state, strict=False)
-    print(json.dumps({"missing_keys": missing, "unexpected_keys": unexpected}, indent=2))
+    key_audit = apply_checkpoint_weights(model, state)
+    audit = {
+        "checkpoint_path": str(checkpoint.resolve()),
+        "checkpoint_sha256": sha256_file(checkpoint),
+        "checkpoint_top_level_keys": sorted(str(key) for key in state.keys()),
+        "last_epoch": json_scalar(state.get("last_epoch", state.get("epoch"))),
+        "last_iter": json_scalar(state.get("last_iter")),
+        "vq_checkpoint_path": str(vq_checkpoint.resolve()),
+        "vq_checkpoint_sha256": sha256_file(vq_checkpoint),
+        **key_audit,
+    }
+    print(json.dumps(audit, indent=2))
+    del state
+    gc.collect()
     model = model.to(device).eval()
     for parameter in model.parameters():
         parameter.requires_grad = False
-    return model, torch
+    return model, torch, audit
 
 
 def run_one(model, torch, row: dict[str, Any], output_root: Path, device: str, truncation: float) -> None:
@@ -103,8 +191,9 @@ def run_one(model, torch, row: dict[str, Any], output_root: Path, device: str, t
     item_id = safe_id(condition_id)
     item_dir = output_root / row["dataset_name"] / f"round_{int(row['round_index']):03d}" / item_id
     generated_path = item_dir / "generated.png"
+    raw_path = item_dir / "raw_256.png"
     metadata_path = item_dir / "metadata.json"
-    if generated_path.is_file() and metadata_path.is_file():
+    if generated_path.is_file() and raw_path.is_file() and metadata_path.is_file():
         return
     gt_path, mask_path, sketch_path = (asset_path(row, key) for key in ("gt_rgb", "hole_mask", "base_sketch"))
     gt_image = Image.open(gt_path).convert("RGB")
@@ -134,14 +223,23 @@ def run_one(model, torch, row: dict[str, Any], output_root: Path, device: str, t
     with torch.no_grad():
         result = model.generate_content(batch=batch, filter_ratio=0, replicate=1, content_ratio=1,
                                         return_att_weight=False, sample_type=f"top{truncation}r")
-    generated_256 = result["content"][0].permute(1, 2, 0).detach().cpu().numpy().clip(0, 255).astype(np.uint8)
+    generated_float = result["content"][0].permute(1, 2, 0).detach().float().cpu().numpy()
+    stats = raw_image_stats(generated_float)
+    if not stats["finite"]:
+        raise ValueError(f"Non-finite pretrained output for {condition_id}")
+    generated_256 = generated_float.clip(0, 255).astype(np.uint8)
     generated_native = np.asarray(Image.fromarray(generated_256).resize(gt_image.size, Image.Resampling.BICUBIC))
     composite = gt.copy()
     composite[mask_native] = generated_native[mask_native]
+    if not np.array_equal(composite[~mask_native], gt[~mask_native]):
+        raise AssertionError(f"Outside-hole pixels changed for {condition_id}")
     item_dir.mkdir(parents=True, exist_ok=True)
     Image.fromarray(composite).save(generated_path)
-    Image.fromarray(pddp_sketch).save(item_dir / "pddp_sketch.png")
-    Image.fromarray((mask_256 * 255).astype(np.uint8)).save(item_dir / "pddp_hole_mask.png")
+    Image.fromarray(generated_256).save(raw_path)
+    sketch_output_path = item_dir / "pddp_sketch.png"
+    mask_output_path = item_dir / "pddp_hole_mask.png"
+    Image.fromarray(pddp_sketch).save(sketch_output_path)
+    Image.fromarray((mask_256 * 255).astype(np.uint8)).save(mask_output_path)
     metadata = {
         "schema_version": 1,
         "condition_id": condition_id,
@@ -157,6 +255,13 @@ def run_one(model, torch, row: dict[str, Any], output_root: Path, device: str, t
         "generated_path": str(generated_path),
         "generated_sha256": sha256_file(generated_path),
         "outside_hole_exact_gt": True,
+        "raw_stats": stats,
+        "outputs": {
+            "raw_256": {"path": str(raw_path), "sha256": sha256_file(raw_path)},
+            "composite": {"path": str(generated_path), "sha256": sha256_file(generated_path)},
+            "pddp_sketch": {"path": str(sketch_output_path), "sha256": sha256_file(sketch_output_path)},
+            "pddp_hole_mask": {"path": str(mask_output_path), "sha256": sha256_file(mask_output_path)},
+        },
     }
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -170,10 +275,18 @@ def main() -> None:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--truncation", type=float, default=0.85)
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--condition-id-file", type=Path)
     parser.add_argument("--verify-hashes", action="store_true")
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args()
     rows = load_conditions(args.canonical_conditions)
+    if args.condition_id_file:
+        requested = read_condition_ids(args.condition_id_file)
+        by_id = {str(row["condition_id"]): row for row in rows}
+        missing_ids = [condition_id for condition_id in requested if condition_id not in by_id]
+        if missing_ids:
+            raise KeyError(f"Unknown canonical condition IDs: {missing_ids}")
+        rows = [by_id[condition_id] for condition_id in requested]
     report = validate(rows, args.output_root, args.verify_hashes)
     report["execute"] = args.execute
     print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -183,7 +296,11 @@ def main() -> None:
         return
     if args.checkpoint is None or not args.checkpoint.is_file():
         raise FileNotFoundError(args.checkpoint)
-    model, torch = load_model(args.config, args.checkpoint, args.device)
+    args.output_root.mkdir(parents=True, exist_ok=True)
+    model, torch, checkpoint_audit = load_model(args.config, args.checkpoint, args.device)
+    (args.output_root / "checkpoint_audit.json").write_text(
+        json.dumps(checkpoint_audit, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     selected = rows[:args.limit] if args.limit else rows
     for index, row in enumerate(selected, 1):
         run_one(model, torch, row, args.output_root, args.device, args.truncation)
