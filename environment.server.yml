@@ -16,11 +16,13 @@ dependencies:
       - albumentations==0.4.3
       - einops==0.3.0
       - efficientnet-pytorch==0.7.1
+      - ftfy==6.1.1
       - imageio==2.9.0
       - omegaconf==2.0.0
       - opencv-python-headless==4.6.0.66
       - pytorch-lightning==1.0.8
       - pytest==7.4.4
+      - regex==2022.8.17
       - scikit-image==0.19.3
       - scipy==1.9.1
       - tensorboard==2.10.0

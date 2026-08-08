@@ -96,3 +96,18 @@ CHECKPOINT=/path/to/final.pth conda run -p /home/zwz_42312/conda_envs/pddp_sketc
 ```
 
 以上三条均属于后续阶段。本阶段不得执行。
+
+## 2026-08-08 预训练 inference-only smoke
+
+- 状态：`DONE`；未运行预处理、训练、backward 或正式 702 条推理。
+- 代码 commit：`677d50cedbeb8716af2c3ca5dbf334e653b1112c`。
+- PDDP 权重：`/home/zwz_42312/temp/downloaded_checkpoints/000297e_1343979iter.pth`，大小 `4,557,700,568`，SHA-256 `f16d0c6519601840b8f17645a5e3cea048ff135b0bb50c700fc0a97b695dcfe1`。
+- VQ-VAE 权重：`/home/zwz_42312/temp/downloaded_checkpoints/last.ckpt`，大小 `376,581,823`，SHA-256 `5cd6c74810ab97e00e942c25403f73afc081e8b19987b31ec0d9ff5b68e7ab14`。
+- 确定性选择：ArtBench、COCO、Mural1 各一张 Easy 和 Hard，均固定 `round_001`；清单见输出目录的 `selection.json`。
+- 服务器输出：`/home/zwz_42312/PDDPoutputs/smoke/pretrained_canonical_v1/`。
+- 本地人工检查副本：`D:/Coding/lab/TSA-inpainting/temp/PDDP_pretrained_smoke_v1/`。
+- 选择、权重审计、统计和总图：服务器输出目录中的 `selection.json`、`checkpoint_audit.json`、`smoke_summary.json`、`contact_sheet.png`。
+- 验收：6/6 成功；使用 EMA transformer；基础模型与 EMA 的核心 missing/unexpected key 均为空；6/6 composite 在 hole 外逐像素严格等于 GT；复制后的输出哈希与 metadata 全部一致；自动严重退化标记为 0。
+- contact sheet SHA-256：`7d3ad17a691918737f38838a78033610788c45eae6838530fb90a1994a94fe6b`。
+- 初步人工结论：权重和推理链路可用，输出有结构、有限且非近常量；但预训练质量不足以作为最终结果。COCO-Hard 有严重人物/肢体语义错误，ArtBench-Hard 与 Mural 样本存在接缝或局部色彩/内容偏差。正式预处理和微调前须等待人工许可。
+- 恢复记录：首次 screen 在加载模型前因最小环境缺少上游 CLIP tokenizer 依赖而停止；补装并固化 `ftfy==6.1.1`、`regex==2022.8.17` 后，在同名 detached screen 中成功重跑。
