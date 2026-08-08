@@ -288,7 +288,7 @@ class TamingGumbelVQVAE(BaseCodec):
         return output
 
     def decode(self, img_seq):
-        if self.quantize_to_full != self.device:
+        if self.quantize_number != 0 and self.quantize_to_full.device != self.device:
             self.quantize_to_full = self.quantize_to_full.to(self.device)
         if self.quantize_number != 0:
             img_seq=self.quantize_to_full[img_seq].type_as(img_seq)
@@ -319,7 +319,9 @@ class DummyContentCodec(BaseCodec):
         self.num_tokens = token_shape[0] * token_shape[1]
         self.trainable = False
 
-        self.vq = TamingGumbelVQVAE()
+        vq_keys = {'config_path', 'ckpt_path', 'num_tokens', 'quantize_number', 'mapping_path'}
+        vq_kwargs = {key: value for key, value in kwargs.items() if key in vq_keys}
+        self.vq = TamingGumbelVQVAE(token_shape=token_shape, **vq_kwargs)
 
         for p in self.vq.parameters():
             p.requires_grad = False

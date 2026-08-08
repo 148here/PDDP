@@ -431,6 +431,9 @@ class Solver(object):
         self.model.train()
         self.last_epoch += 1
 
+        if 'set_epoch' in self.dataloader:
+            self.dataloader['set_epoch'](self.last_epoch)
+
         if self.args.distributed:
             self.dataloader['train_loader'].sampler.set_epoch(self.last_epoch)
 

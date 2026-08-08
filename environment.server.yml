@@ -1,0 +1,23 @@
+name: pddp-sketch-inpainting
+channels: [pytorch, nvidia, conda-forge]
+dependencies:
+  - python=3.8
+  - pytorch=1.13.1
+  - torchvision=0.14.1
+  - pytorch-cuda=11.6
+  - numpy=1.23.5
+  - pillow=9.3.0
+  - pyyaml=6.0
+  - pip
+  - pip:
+      - albumentations==0.4.3
+      - einops==0.3.0
+      - efficientnet-pytorch==0.7.1
+      - imageio==2.9.0
+      - omegaconf==2.0.0
+      - opencv-python-headless==4.6.0.66
+      - pytorch-lightning==1.0.8
+      - scikit-image==0.19.3
+      - scipy==1.9.1
+      - tensorboard==2.10.0
+      - tqdm==4.64.1

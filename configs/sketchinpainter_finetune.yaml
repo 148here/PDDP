@@ -1,0 +1,127 @@
+model:
+  target: image_synthesis.modeling.models.dalle.DALLE
+  params:
+    content_info: {key: quantized_image}
+    condition_info: {key: sketch}
+    image_size: [256, 256]
+    content_codec_config:
+      target: image_synthesis.modeling.codecs.image_codec.taming_gumbel_vqvae.DummyContentCodec
+      params:
+        trainable: false
+        token_shape: [32, 32]
+        config_path: configs/vqvae_openimages.yaml
+        ckpt_path: /home/zwz_42312/temp/downloaded_checkpoints/last.ckpt
+        num_tokens: 8192
+        quantize_number: 2887
+        mapping_path: help_folder/statistics/taming_vqvae_2887.pt
+    condition_codec_config:
+      target: image_synthesis.modeling.codecs.sketch_codec.codec.SketchCodec
+      params: {sketch_size: [224, 224], patch_size: [16, 16]}
+    diffusion_config:
+      target: image_synthesis.modeling.transformers.diffusion_transformer.DiffusionTransformer
+      params:
+        diffusion_step: 50
+        alpha_init_type: alpha1
+        auxiliary_loss_weight: 5.0e-4
+        adaptive_auxiliary_loss: true
+        mask_weight: [1, 1]
+        lpips_net: null
+        lpips_weight: 0.0
+        transformer_config:
+          target: image_synthesis.modeling.transformers.transformer_utils.SketchInpaintingTransformer
+          params:
+            attn_type: self
+            n_layer: 16
+            condition_seq_len: 197
+            content_seq_len: 1024
+            content_spatial_size: [32, 32]
+            n_embd: 1024
+            n_head: 16
+            attn_pdrop: 0.0
+            resid_pdrop: 0.0
+            block_activate: GELU2
+            timestep_type: adalayernorm
+            mlp_hidden_times: 4
+        condition_emb_config:
+          target: image_synthesis.modeling.embeddings.sketch_embedding.ResNetEmbedding
+          params:
+            name: resnet50
+            normalize: true
+            embed_dim: 1024
+            use_avg: false
+            layers_to_keep: 6
+            pretrained_model_path: none
+            trainable: true
+        content_emb_config:
+          target: image_synthesis.modeling.embeddings.dalle_mask_image_embedding.DalleMaskImageEmbedding
+          params:
+            num_embed: 2887
+            spatial_size: !!python/tuple [32, 32]
+            embed_dim: 1024
+            trainable: true
+            pos_emb_type: embedding
+
+solver:
+  base_lr: 4.0e-6
+  adjust_lr: none
+  max_epochs: 250
+  save_epochs: 2
+  validation_epochs: 5
+  sample_iterations: 5000
+  print_specific_things: true
+  accumulate_grad_iters: 2
+  ema: {decay: 0.99, update_interval: 25, device: cpu}
+  clip_grad_norm:
+    target: image_synthesis.engine.clip_grad_norm.ClipGradNorm
+    params: {start_iteration: 0, end_iteration: 5000, max_norm: 0.5}
+  optimizers_and_schedulers:
+    - name: none
+      optimizer:
+        target: torch.optim.AdamW
+        params: {betas: !!python/tuple [0.9, 0.96], weight_decay: 4.5e-3}
+      scheduler:
+        step_iteration: 1
+        target: image_synthesis.engine.lr_scheduler.ReduceLROnPlateauWithWarmup
+        params: {factor: 0.5, patience: 60000, min_lr: 1.0e-6, threshold: 1.0e-1, threshold_mode: rel, warmup_lr: 2.0e-4, warmup: 1000}
+
+dataloader:
+  data_root: ''
+  batch_size: 4
+  num_workers: 4
+  persistent_workers: true
+  train_datasets:
+    - target: image_synthesis.data.sketchinpainter_dataset.SketchInpainterPDDPDataset
+      params: &dataset_params
+        manifest_path: /home/zwz_42312/PDDPoutputs/preprocessed/training_manifest.jsonl
+        mask_dirs: [/cpfs01/projects-SSD/cfff-27504eab520e_SSD/zwz_42312/yza/data/mural1/train/1/masks]
+        sketchinpainter_root: /cpfs01/projects-SSD/cfff-27504eab520e_SSD/zwz_42312/yza/SketchInpainter
+        phase: train
+        global_seed: 20260425
+        dataset_weights: {artbench: 1.0, mural1: 0.1}
+        mask_count_probs: {1: 0.5, 2: 0.5}
+        random_mask_rotate_90: true
+        image_size: [256, 256]
+        sketch_size: [224, 224]
+        bbox_scale: 1.2
+        sketch_overrides:
+          sigma_mean: 9.1
+          sigma_std: 1.82
+          move_prob: 0.6
+          spatial_smooth_sigma: 1.4
+          feather_px: 6
+          cp_sigma_mean: 1.6
+          cp_sigma_std: 0.28
+          cp_radius: 12.0
+          cp_spatial_smooth: 1.05
+          field_sigma: 4.2
+          adaptive_stroke_mode: mask_density_bins
+          adaptive_stroke_density_low: 0.015
+          adaptive_stroke_density_high: 0.060
+          adaptive_stroke_thin_width: 2
+          adaptive_stroke_medium_width: 3
+          adaptive_stroke_thick_width: 4
+  validation_datasets:
+    - target: image_synthesis.data.sketchinpainter_dataset.SketchInpainterPDDPDataset
+      params:
+        <<: *dataset_params
+        phase: validation

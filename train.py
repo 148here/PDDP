@@ -70,6 +70,8 @@ def get_args():
 
     parser.add_argument('--debug', action='store_true', default=False,
                         help='set as debug mode')
+    parser.add_argument('--dry_run', action='store_true', default=False,
+                        help='validate config and dataloaders without building a model or using CUDA')
     # args for modify config
     parser.add_argument(
         "opts",
@@ -104,6 +106,21 @@ def get_args():
 
 def main():
     args = get_args()
+
+    if args.dry_run:
+        config = load_yaml_config(args.config_file)
+        config = merge_opts_to_config(config, args.opts)
+        args.local_rank = 0
+        args.global_rank = 0
+        args.distributed = False
+        info = build_dataloader(config, args, return_dataset=True)
+        print({
+            'train_samples': len(info['train_dataset']),
+            'validation_samples': len(info['validation_dataset']),
+            'train_iterations': info['train_iterations'],
+            'validation_iterations': info['validation_iterations'],
+        })
+        return
 
     if args.seed is not None or args.cudnn_deterministic:
         seed_everything(args.seed, args.cudnn_deterministic)

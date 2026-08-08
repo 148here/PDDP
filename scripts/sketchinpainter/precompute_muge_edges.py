@@ -1,0 +1,60 @@
+"""Precompute MuGE edges. Default mode is a read-only plan; --execute runs MuGE."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+import cv2
+
+
+def rows(path: Path):
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                yield json.loads(line)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--sketchinpainter-root", type=Path, required=True)
+    parser.add_argument("--muge-source-root", type=Path, required=True)
+    parser.add_argument("--muge-checkpoint", type=Path, required=True)
+    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--execute", action="store_true", help="actually load MuGE and write edges")
+    parser.add_argument("--resume", action="store_true")
+    args = parser.parse_args()
+    manifest_rows = list(rows(args.manifest))
+    missing = [row for row in manifest_rows if not Path(row["edge_path"]).is_file()]
+    print(json.dumps({"conditions": len(manifest_rows), "missing_edges": len(missing), "execute": args.execute}, indent=2))
+    if not args.execute:
+        return
+    if not args.muge_checkpoint.is_file():
+        raise FileNotFoundError(args.muge_checkpoint)
+    sys.path.insert(0, str(args.sketchinpainter_root.resolve()))
+    from dataset.makeedge.muge import get_muge_extractor
+
+    extractor = get_muge_extractor(
+        source_root=str(args.muge_source_root), checkpoint_path=str(args.muge_checkpoint), device=args.device
+    )
+    for index, row in enumerate(manifest_rows, 1):
+        output = Path(row["edge_path"])
+        if args.resume and output.is_file():
+            continue
+        image = cv2.imread(row["image_path"], cv2.IMREAD_COLOR)
+        if image is None:
+            raise ValueError(f"Failed to read {row['image_path']}")
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        edge = extractor.extract(rgb, alpha=1.0, inference_seed=42, line_polarity="black_on_white")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(str(output), edge):
+            raise OSError(f"Failed to write {output}")
+        if index % 100 == 0:
+            print(f"{index}/{len(manifest_rows)}")
+
+
+if __name__ == "__main__":
+    main()

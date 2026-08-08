@@ -4,6 +4,15 @@ from torch.utils.data import ConcatDataset
 from image_synthesis.utils.misc import instantiate_from_config
 from image_synthesis.distributed.distributed import is_distributed
 
+
+def _set_epoch(dataset, epoch):
+    """Propagate the epoch through nested datasets without assuming DDP."""
+    if hasattr(dataset, 'set_epoch'):
+        dataset.set_epoch(epoch)
+    if hasattr(dataset, 'datasets'):
+        for child in dataset.datasets:
+            _set_epoch(child, epoch)
+
 def build_dataloader(config, args=None, return_dataset=False):
     dataset_cfg = config['dataloader']
     train_dataset = []
@@ -42,7 +51,8 @@ def build_dataloader(config, args=None, return_dataset=False):
     #     num_workers = min(64, num_workers)
     # else:
     #     num_workers = dataset_cfg['num_workers']
-    num_workers = 16
+    num_workers = int(dataset_cfg.get('num_workers', 16))
+    persistent_workers = bool(dataset_cfg.get('persistent_workers', num_workers > 0)) and num_workers > 0
     train_loader = torch.utils.data.DataLoader(train_dataset, 
                                                batch_size=dataset_cfg['batch_size'], 
                                                shuffle=(train_sampler is None),
@@ -50,7 +60,7 @@ def build_dataloader(config, args=None, return_dataset=False):
                                                pin_memory=True, 
                                                sampler=train_sampler, 
                                                drop_last=True,
-                                               persistent_workers=True)
+                                               persistent_workers=persistent_workers)
 
     val_loader = torch.utils.data.DataLoader(val_dataset, 
                                              batch_size=dataset_cfg['batch_size'], 
@@ -58,14 +68,15 @@ def build_dataloader(config, args=None, return_dataset=False):
                                              num_workers=num_workers, 
                                              pin_memory=True, 
                                              sampler=val_sampler, 
-                                             drop_last=True,
-                                             persistent_workers=True)
+                                             drop_last=False,
+                                             persistent_workers=persistent_workers)
 
     dataload_info = {
         'train_loader': train_loader,
         'validation_loader': val_loader,
         'train_iterations': train_iters,
-        'validation_iterations': val_iters
+        'validation_iterations': val_iters,
+        'set_epoch': lambda epoch: (_set_epoch(train_dataset, epoch), _set_epoch(val_dataset, epoch)),
     }
     
     if return_dataset:
