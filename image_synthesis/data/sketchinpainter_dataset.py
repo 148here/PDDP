@@ -240,5 +240,6 @@ class SketchInpainterPDDPDataset(Dataset):
             "sketch_file": str(row["sample_id"]),
             "condition_seed": condition_seed,
             "mask_paths": "|".join(mask_paths),
-            "mask_rotations": torch.tensor(rotations, dtype=torch.int16),
+            # Strings keep default DataLoader collation valid when mask_count is 1 or 2.
+            "mask_rotations": "|".join(str(value) for value in rotations),
         }
