@@ -160,7 +160,7 @@ CHECKPOINT=/path/to/final.pth conda run -p /home/zwz_42312/conda_envs/pddp_sketc
 ### 验证与交付
 
 - 实现提交：`16c5ce7`；测试环境判断修复：`f168dc9`。均已推送到 `git@github.com:148here/PDDP.git` 的 `main`。
-- 服务器在更新前把 tracked/untracked dirty worktree 保存为可恢复 `stash@{0}: pre_protocol_fix_20260810_`，随后 fast-forward 到 `f168dc9`；旧 checkpoint、日志和输出未删除。
+- 服务器在更新前把 tracked/untracked dirty worktree保存为命名 stash `pre_protocol_fix_20260810_`；CPU 测试生成的 tracked/untracked pycache 另存为 `post_cpu_tests_pycache_20260810`。随后 fast-forward 到最终提交；旧 checkpoint、日志和输出未删除。
 - 服务器 CPU pytest：设置真实 `SKETCHINPAINTER_ROOT` 后 `37 passed`；覆盖 bbox crop、训练/推理逐像素一致、persistent worker、AMP/FP32 accumulation、clip 区间、EMA 初始化、resume 和三数据集 manifest。
 - 配置 DataLoader dry-run 通过：基于旧 ArtBench/Mural1 manifest，修复版 batch 16 得到 effective train/validation `50,919 / 557`、iterations `3,182 / 34`。
 - shell `bash -n` 通过。旧缓存逐行审计 `52,964/52,964`，错误 `0`。
