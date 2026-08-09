@@ -1,6 +1,6 @@
 # PDDP × SketchInpainter 适配工作记录
 
-最后更新：2026-08-08（第一阶段验收完成）
+最后更新：2026-08-10（训练链路与局部 Sketch 协议修复完成）
 
 ## 固定目标与路径
 
@@ -131,3 +131,44 @@ CHECKPOINT=/path/to/final.pth conda run -p /home/zwz_42312/conda_envs/pddp_sketc
 - 正式一轮从原始 PDDP checkpoint 重新初始化，使用固定 `4e-6`，不沿用 pilot optimizer/model 更新；目标为 `6364` step（一个有效 epoch）。
 - 每 1000 step 原子覆盖同一个 `checkpoint/last.pth`，结束时强制覆盖最终权重；仍只保留一个训练 checkpoint。
 - 正式 screen：`pddp_finetune_fullsketch_one_epoch_v1`；日志：`/home/zwz_42312/PDDPoutputs/train_control/formal_screen.log`。
+
+## 2026-08-10 训练链路与局部 Sketch 协议修复
+
+状态：`DONE（代码与 CPU 验证）`。本批未加载 checkpoint、未申请 GPU、未生成新缓存、未训练、未推理。
+
+### 已确认失效的旧实验
+
+- 旧完整 sketch 四轮训练实际结束于 `12,728` step；checkpoint 保留在 `/home/zwz_42312/PDDPoutputs/train/sketchinpainter_finetune/checkpoint/last.pth`，日志保留在 `/home/zwz_42312/PDDPoutputs/train_control/batch16_4epoch_screen.log`。
+- 该 checkpoint 同时受旧输入协议、AMP 梯度裁剪顺序、裁剪区间、persistent worker epoch 不传播以及预训练 EMA/训练状态初始化问题影响，只供审计；不得 resume，也不得作为正式对比结果。
+
+### 新固定协议
+
+- `sketch_scope=bbox_crop`：free-form mask nearest resize 到 `256×256` 并原样作为 `obj_mask`；使用全部前景 union bbox，扩展 `1.2×`，裁剪框内全部 sketch 线条，等比例缩放并白底 padding 到 `224×224`。
+- 框内位于 mask 外的线条保留，框外线条删除；空 mask 报错，边界确定性截断。训练与 canonical/selected-nine 推理共用同一 helper。
+- 保留显式 `full` 与 `hole_crop` 作为历史兼容选项；推理 metadata 写入 scope、bbox scale、实际 bbox、源尺寸和输出尺寸。
+- 完整 COCO train 纳入 manifest。只读扫描确认 ArtBench/COCO/Mural1 为 `51,300 / 118,287 / 1,664`，总计 `171,251`；稳定哈希划分 train/validation 为 `169,508 / 1,743`。
+- 训练采样权重为 ArtBench `1.0`、COCO `0.43369`、Mural1 `0.1`。修复版配置为单卡 batch `16`、`max_epochs=4`、`max_iterations=-1`，仍仅原子覆盖 `last.pth`。
+
+### 训练正确性修复
+
+- AMP 顺序固定为 scaled backward → optimizer boundary → unscale → clip → scaler step/update；AMP/FP32 的 clip、optimizer、scheduler 和 EMA 都只在累积边界执行。
+- `ClipGradNorm` 使用严格区间 `start_iteration <= step < end_iteration`，负 end 无上限。
+- 官方预训练初始化仅加载 base model，并用官方 EMA 覆盖 live transformer 与 EMA shadow；不继承 iteration、optimizer、scheduler 或 clip 状态。只有正式 resume 才恢复完整训练状态，核心 key mismatch 直接失败。
+- dataset epoch 改为共享内存 tensor，`persistent_workers=True` 时同 epoch 可复现、跨 epoch 条件变化。
+- 训练前缓存检查改为逐 manifest 行验证 edge 可读、VQ token 为合法 1024-token schema，不再使用 `52,964` 硬编码文件数。
+
+### 验证与交付
+
+- 实现提交：`16c5ce7`；测试环境判断修复：`f168dc9`。均已推送到 `git@github.com:148here/PDDP.git` 的 `main`。
+- 服务器在更新前把 tracked/untracked dirty worktree 保存为可恢复 `stash@{0}: pre_protocol_fix_20260810_`，随后 fast-forward 到 `f168dc9`；旧 checkpoint、日志和输出未删除。
+- 服务器 CPU pytest：设置真实 `SKETCHINPAINTER_ROOT` 后 `37 passed`；覆盖 bbox crop、训练/推理逐像素一致、persistent worker、AMP/FP32 accumulation、clip 区间、EMA 初始化、resume 和三数据集 manifest。
+- 配置 DataLoader dry-run 通过：基于旧 ArtBench/Mural1 manifest，修复版 batch 16 得到 effective train/validation `50,919 / 557`、iterations `3,182 / 34`。
+- shell `bash -n` 通过。旧缓存逐行审计 `52,964/52,964`，错误 `0`。
+- 完整 COCO manifest 仅运行 `--dry-run`，目标路径 `/home/zwz_42312/PDDPoutputs/preprocessed/training_manifest_with_coco.jsonl` 未写入（`written=false`）。
+
+### 下一阶段（不得由本批自动执行）
+
+1. 正式写入包含 COCO 的 `training_manifest.jsonl`，生成缺失的 `118,287` 组 MuGE edge 与 VQ token，并逐行复验。
+2. 在无其他 GPU 作业时执行单 batch forward/backward smoke，检查显存、loss 和 EMA 初始化审计。
+3. 从官方 checkpoint 全新初始化，在 detached screen 中训练 4 epochs；不得恢复旧 `12,728-step` checkpoint。
+4. 使用最终 checkpoint 按 `bbox_crop/1.2×` 跑 selected-nine 与 canonical 702，之后接入 Mixed Easy/Medium/Hard 指标。
