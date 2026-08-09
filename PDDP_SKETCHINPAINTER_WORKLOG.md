@@ -1,6 +1,6 @@
 # PDDP × SketchInpainter 适配工作记录
 
-最后更新：2026-08-10（训练链路与局部 Sketch 协议修复完成）
+最后更新：2026-08-10（五轮 bbox-crop + COCO 正式流水线准备）
 
 ## 固定目标与路径
 
@@ -172,3 +172,12 @@ CHECKPOINT=/path/to/final.pth conda run -p /home/zwz_42312/conda_envs/pddp_sketc
 2. 在无其他 GPU 作业时执行单 batch forward/backward smoke，检查显存、loss 和 EMA 初始化审计。
 3. 从官方 checkpoint 全新初始化，在 detached screen 中训练 4 epochs；不得恢复旧 `12,728-step` checkpoint。
 4. 使用最终 checkpoint 按 `bbox_crop/1.2×` 跑 selected-nine 与 canonical 702，之后接入 Mixed Easy/Medium/Hard 指标。
+
+## 2026-08-10 五轮正式训练流水线
+
+- 状态：`IN PROGRESS`。
+- 用户将训练总量调整为 `5` 个完整 epoch；配置 `max_epochs=5`、`max_iterations=-1`、batch size `16`、固定学习率 `4e-6`。
+- 正式 run name：`sketchinpainter_finetune_bbox_coco_5epoch_v1`；输出：`/home/zwz_42312/PDDPoutputs/train/sketchinpainter_finetune_bbox_coco_5epoch_v1/`。
+- 启动前检查发现完整 COCO 的 MuGE edge/VQ token 均为 `0/118,287`，因此不得直接使用旧 ArtBench/Mural1-only manifest 启动训练。
+- detached screen 将依次执行：写入 171,251 条三数据集 manifest → resume 补齐 COCO MuGE → resume 补齐 COCO VQ token → 逐行缓存审计 → 从官方 PDDP EMA 全新初始化五轮训练。
+- 旧 `/home/zwz_42312/PDDPoutputs/train/sketchinpainter_finetune/checkpoint/last.pth` 继续只供审计，不 resume、不覆盖。

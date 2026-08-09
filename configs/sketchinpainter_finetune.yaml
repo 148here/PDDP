@@ -64,7 +64,7 @@ model:
 solver:
   base_lr: 4.0e-6
   adjust_lr: none
-  max_epochs: 4
+  max_epochs: 5
   max_iterations: -1
   save_iterations: 1000
   keep_only_last_checkpoint: true
