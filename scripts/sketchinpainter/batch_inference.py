@@ -214,12 +214,13 @@ def run_one(model, torch, row: dict[str, Any], output_root: Path, device: str, t
         "obj_mask": torch.from_numpy(mask_256.astype(np.float32)).unsqueeze(0).to(device),
         "sketch": torch.from_numpy(pddp_sketch.astype(np.float32)).permute(2, 0, 1).unsqueeze(0).to(device),
     }
-    seed = int(row.get("seed", 0)) % (2**31 - 1)
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+    comparison_seed = int(row.get("comparison_seed", row.get("seed", 0)))
+    effective_seed = comparison_seed % (2**31 - 1)
+    random.seed(effective_seed)
+    np.random.seed(effective_seed)
+    torch.manual_seed(effective_seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+        torch.cuda.manual_seed_all(effective_seed)
     with torch.no_grad():
         result = model.generate_content(batch=batch, filter_ratio=0, replicate=1, content_ratio=1,
                                         return_att_weight=False, sample_type=f"top{truncation}r")
@@ -246,7 +247,10 @@ def run_one(model, torch, row: dict[str, Any], output_root: Path, device: str, t
         "source_id": row["source_id"],
         "dataset_name": row["dataset_name"],
         "round_index": row["round_index"],
-        "seed": seed,
+        "seed": effective_seed,
+        "comparison_seed": comparison_seed,
+        "effective_seed": effective_seed,
+        "seed_note": "PDDP/NumPy require a 31-bit seed; effective_seed = comparison_seed mod (2^31-1).",
         "prompt_used": False,
         "prompt_note": "PDDP has no text-prompt input; canonical prompt is intentionally ignored.",
         "canonical_shared_condition_hash": row.get("shared_condition_hash"),
