@@ -229,7 +229,10 @@ def test_manifest_cache_validation_is_per_row_not_global_count(tmp_path: Path):
 
 
 def test_real_sketchinpainter_adapter_shapes_and_reproducibility(tmp_path: Path):
-    sketch_root = Path(os.environ.get("SKETCHINPAINTER_ROOT", ""))
+    sketch_root_value = os.environ.get("SKETCHINPAINTER_ROOT")
+    if not sketch_root_value:
+        pytest.skip("SKETCHINPAINTER_ROOT is not available")
+    sketch_root = Path(sketch_root_value)
     if not sketch_root.is_dir():
         pytest.skip("SKETCHINPAINTER_ROOT is not available")
     image = np.full((64, 64, 3), 180, dtype=np.uint8)
