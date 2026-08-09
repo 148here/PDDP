@@ -23,7 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from image_synthesis.data.sketchinpainter_dataset import resize_full_sketch, sha256_file
+from image_synthesis.data.sketchinpainter_dataset import prepare_pddp_sketch, sha256_file
 
 
 def load_conditions(path: Path) -> list[dict[str, Any]]:
@@ -186,7 +186,17 @@ def load_model(config_path: Path, checkpoint: Path, device: str):
     return model, torch, audit
 
 
-def run_one(model, torch, row: dict[str, Any], output_root: Path, device: str, truncation: float) -> None:
+def run_one(
+    model,
+    torch,
+    row: dict[str, Any],
+    output_root: Path,
+    device: str,
+    truncation: float,
+    *,
+    sketch_scope: str = "bbox_crop",
+    bbox_scale: float = 1.2,
+) -> None:
     condition_id = str(row["condition_id"])
     item_id = safe_id(condition_id)
     item_dir = output_root / row["dataset_name"] / f"round_{int(row['round_index']):03d}" / item_id
@@ -194,6 +204,12 @@ def run_one(model, torch, row: dict[str, Any], output_root: Path, device: str, t
     raw_path = item_dir / "raw_256.png"
     metadata_path = item_dir / "metadata.json"
     if generated_path.is_file() and raw_path.is_file() and metadata_path.is_file():
+        existing = json.loads(metadata_path.read_text(encoding="utf-8"))
+        preprocessing = existing.get("sketch_preprocessing", {})
+        if preprocessing.get("scope") != sketch_scope or float(preprocessing.get("bbox_scale", -1)) != float(bbox_scale):
+            raise ValueError(
+                f"Existing result uses incompatible sketch preprocessing for {condition_id}: {preprocessing}"
+            )
         return
     gt_path, mask_path, sketch_path = (asset_path(row, key) for key in ("gt_rgb", "hole_mask", "base_sketch"))
     gt_image = Image.open(gt_path).convert("RGB")
@@ -204,7 +220,13 @@ def run_one(model, torch, row: dict[str, Any], output_root: Path, device: str, t
     if sketch is None:
         raise ValueError(f"Failed to read {sketch_path}")
     sketch = cv2.resize(sketch, (256, 256), interpolation=cv2.INTER_LINEAR)
-    pddp_sketch = resize_full_sketch(sketch, output_size=224)
+    pddp_sketch, sketch_preprocessing = prepare_pddp_sketch(
+        sketch,
+        mask_256,
+        scope=sketch_scope,
+        output_size=224,
+        bbox_scale=bbox_scale,
+    )
     image_256 = np.asarray(gt_image.resize((256, 256), Image.Resampling.BICUBIC), dtype=np.float32).copy()
     image_tensor = torch.from_numpy(image_256).permute(2, 0, 1).unsqueeze(0).to(device)
     with torch.no_grad():
@@ -253,6 +275,7 @@ def run_one(model, torch, row: dict[str, Any], output_root: Path, device: str, t
         "seed_note": "PDDP/NumPy require a 31-bit seed; effective_seed = comparison_seed mod (2^31-1).",
         "prompt_used": False,
         "prompt_note": "PDDP has no text-prompt input; canonical prompt is intentionally ignored.",
+        "sketch_preprocessing": sketch_preprocessing,
         "canonical_shared_condition_hash": row.get("shared_condition_hash"),
         "inputs": {key: {"path": str(path), "sha256": sha256_file(path)} for key, path in
                    (("gt_rgb", gt_path), ("hole_mask", mask_path), ("base_sketch", sketch_path))},
@@ -278,11 +301,15 @@ def main() -> None:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--truncation", type=float, default=0.85)
+    parser.add_argument("--sketch-scope", choices=("bbox_crop", "full", "hole_crop"), default="bbox_crop")
+    parser.add_argument("--bbox-scale", type=float, default=1.2)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--condition-id-file", type=Path)
     parser.add_argument("--verify-hashes", action="store_true")
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args()
+    if args.bbox_scale <= 0:
+        raise ValueError("--bbox-scale must be positive")
     rows = load_conditions(args.canonical_conditions)
     if args.condition_id_file:
         requested = read_condition_ids(args.condition_id_file)
@@ -307,7 +334,16 @@ def main() -> None:
     )
     selected = rows[:args.limit] if args.limit else rows
     for index, row in enumerate(selected, 1):
-        run_one(model, torch, row, args.output_root, args.device, args.truncation)
+        run_one(
+            model,
+            torch,
+            row,
+            args.output_root,
+            args.device,
+            args.truncation,
+            sketch_scope=args.sketch_scope,
+            bbox_scale=args.bbox_scale,
+        )
         if index % 10 == 0:
             print(f"{index}/{len(selected)}")
 

@@ -171,10 +171,7 @@ def main_worker(local_rank, args):
 
     # resume 
     if args.load_path is not None: # only load the model paramters
-        solver.resume(path=args.load_path,
-                      # load_model=True,
-                      load_optimizer_and_scheduler=False,
-                      load_others=False)
+        solver.load_pretrained(path=args.load_path)
     if args.auto_resume:
         solver.resume()
     # with torch.autograd.set_detect_anomaly(True):

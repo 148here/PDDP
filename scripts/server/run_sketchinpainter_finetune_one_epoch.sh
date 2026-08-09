@@ -3,15 +3,10 @@ set -euo pipefail
 
 OUTPUT_ROOT="${OUTPUT_ROOT:-/home/zwz_42312/PDDPoutputs}"
 MANIFEST="${OUTPUT_ROOT}/preprocessed/training_manifest.jsonl"
-EXPECTED=52964
+PYTHON_BIN="${PYTHON_BIN:-/home/zwz_42312/conda_envs/pddp_sketch_inpainting/bin/python}"
 
 test -f "${MANIFEST}"
-edge_count="$(find "${OUTPUT_ROOT}/preprocessed/muge_edges" -type f | wc -l)"
-token_count="$(find "${OUTPUT_ROOT}/preprocessed/vq_tokens" -type f | wc -l)"
-if [[ "${edge_count}" -ne "${EXPECTED}" || "${token_count}" -ne "${EXPECTED}" ]]; then
-  echo "Incomplete preprocessing: edges=${edge_count}, tokens=${token_count}, expected=${EXPECTED}" >&2
-  exit 1
-fi
+"${PYTHON_BIN}" scripts/sketchinpainter/validate_preprocessed_manifest.py --manifest "${MANIFEST}"
 
 date -Is > "${OUTPUT_ROOT}/train_control/formal_started_at.txt"
 bash scripts/server/train_sketchinpainter_finetune.sh --log_frequency 50

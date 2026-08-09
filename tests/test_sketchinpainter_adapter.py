@@ -5,10 +5,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
+import torch
 from torch.utils.data import DataLoader
 
 from image_synthesis.data.sketchinpainter_dataset import (
     crop_and_pad_sketch,
+    bbox_crop_and_pad_sketch,
+    expanded_mask_bbox,
+    prepare_pddp_sketch,
     resize_full_sketch,
     load_hole_mask,
     load_jsonl,
@@ -16,7 +20,21 @@ from image_synthesis.data.sketchinpainter_dataset import (
     SketchInpainterPDDPDataset,
     stable_seed,
 )
-from scripts.sketchinpainter.build_manifest import stable_split, training_root
+from scripts.sketchinpainter.build_manifest import build_rows, stable_split, training_root
+from scripts.sketchinpainter.validate_preprocessed_manifest import validate_manifest_caches
+
+
+class EpochProbeDataset(SketchInpainterPDDPDataset):
+    """Minimal worker probe for the production shared-epoch implementation."""
+
+    def __init__(self):
+        self._epoch = torch.zeros((), dtype=torch.int64).share_memory_()
+
+    def __len__(self):
+        return 4
+
+    def __getitem__(self, index):
+        return stable_seed(11, self.epoch, index)
 
 
 def test_stable_seed_is_repeatable_and_sensitive():
@@ -65,6 +83,51 @@ def test_resize_full_sketch_preserves_lines_outside_hole_semantics():
     assert result[:, 90:120].min() < 128
 
 
+def test_bbox_crop_retains_all_lines_inside_expanded_box_and_discards_outside():
+    sketch = np.full((100, 160), 255, dtype=np.uint8)
+    hole = np.zeros_like(sketch)
+    hole[40:60, 70:90] = 1
+    # Bbox scale 2.0 gives x=[60,100), y=[30,70).
+    sketch[35:65, 62] = 0       # inside bbox, outside free-form mask
+    sketch[35:65, 50] = 0       # outside bbox
+    original_mask = hole.copy()
+    result, bbox = bbox_crop_and_pad_sketch(sketch, hole, output_size=224, bbox_scale=2.0)
+    assert bbox == (60, 30, 100, 70)
+    assert result.shape == (224, 224, 3)
+    assert result[:, :30].min() < 128
+    assert np.array_equal(hole, original_mask)
+    # Only one black component was inside the crop.
+    assert (result[..., 0] < 128).sum() < 224 * 20
+
+
+def test_bbox_crop_multicomponent_border_padding_and_training_inference_identity():
+    sketch = np.full((80, 160), 255, dtype=np.uint8)
+    sketch[0:10, 1] = 0
+    sketch[60:75, 150] = 0
+    mask = np.zeros((80, 160), dtype=np.uint8)
+    mask[0:4, 0:5] = 1
+    mask[60:80, 145:160] = 1
+    bbox = expanded_mask_bbox(mask, bbox_scale=1.2)
+    assert bbox[0] == 0 and bbox[1] == 0 and bbox[2:] == (160, 80)
+    training_value, training_meta = prepare_pddp_sketch(
+        sketch, mask, scope="bbox_crop", output_size=224, bbox_scale=1.2
+    )
+    inference_value, inference_meta = prepare_pddp_sketch(
+        sketch.copy(), mask.copy(), scope="bbox_crop", output_size=224, bbox_scale=1.2
+    )
+    assert np.array_equal(training_value, inference_value)
+    assert training_meta == inference_meta
+    assert np.all(training_value[:50] == 255)  # vertical white padding for a 2:1 crop
+
+
+def test_bbox_crop_empty_mask_and_invalid_scope_fail():
+    value = np.full((8, 8), 255, dtype=np.uint8)
+    with pytest.raises(ValueError, match="empty"):
+        bbox_crop_and_pad_sketch(value, np.zeros_like(value))
+    with pytest.raises(ValueError, match="scope"):
+        prepare_pddp_sketch(value, np.ones_like(value), scope="unknown")
+
+
 def test_duplicate_manifest_id_is_rejected(tmp_path: Path):
     manifest = tmp_path / "manifest.jsonl"
     row = {"sample_id": "artbench:x"}
@@ -85,6 +148,57 @@ def test_training_root_excludes_sibling_test_split(tmp_path: Path):
     assert training_root(tmp_path) == tmp_path / "train"
 
 
+def test_three_dataset_manifest_excludes_coco_test_and_has_unique_ids(tmp_path: Path):
+    output = tmp_path / "output"
+    roots = {}
+    for name in ("artbench", "coco", "mural1"):
+        root = tmp_path / name
+        (root / "train" / "1" / "images").mkdir(parents=True)
+        (root / "train" / "1" / "images" / f"{name}.png").write_bytes(b"image")
+        (root / "test" / "1" / "images").mkdir(parents=True)
+        (root / "test" / "1" / "images" / "leak.png").write_bytes(b"image")
+        roots[name] = training_root(root)
+    rows = [row for name in sorted(roots) for row in build_rows(name, roots[name], output, 1.0)]
+    assert {row["dataset"] for row in rows} == {"artbench", "coco", "mural1"}
+    assert len(rows) == 3
+    assert len({row["sample_id"] for row in rows}) == 3
+    assert all("test" not in Path(row["rel_key"]).parts for row in rows)
+    assert [row["split"] for row in rows] == [stable_split(row["sample_id"], 1.0) for row in rows]
+
+
+def test_dataset_weights_produce_expected_effective_length(tmp_path: Path):
+    manifest = tmp_path / "manifest.jsonl"
+    rows = []
+    for dataset, count in (("artbench", 10), ("coco", 20), ("mural1", 5)):
+        for index in range(count):
+            rows.append({
+                "sample_id": f"{dataset}:{index}", "dataset": dataset, "split": "train",
+                "image_path": "missing", "edge_path": "missing", "token_path": "missing",
+            })
+    manifest.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+    mask_dir = tmp_path / "masks"
+    mask_dir.mkdir()
+    cv2.imwrite(str(mask_dir / "mask.png"), np.ones((4, 4), dtype=np.uint8) * 255)
+    dataset = SketchInpainterPDDPDataset(
+        manifest_path=str(manifest), mask_dirs=[str(mask_dir)], sketchinpainter_root=str(tmp_path),
+        validate_files=False, dataset_weights={"artbench": 1.0, "coco": 0.43369, "mural1": 0.1},
+    )
+    assert len(dataset) == round(10 + 20 * 0.43369 + 5 * 0.1)
+
+
+def test_persistent_workers_observe_epoch_changes_and_repeat_same_epoch():
+    dataset = EpochProbeDataset()
+    loader = DataLoader(dataset, batch_size=4, shuffle=False, num_workers=2, persistent_workers=True)
+    dataset.set_epoch(3)
+    first = next(iter(loader)).tolist()
+    dataset.set_epoch(3)
+    repeated = next(iter(loader)).tolist()
+    dataset.set_epoch(4)
+    changed = next(iter(loader)).tolist()
+    assert first == repeated
+    assert first != changed
+
+
 def test_vq_token_cache_schema_and_corruption(tmp_path: Path):
     valid = tmp_path / "valid.npy"
     invalid = tmp_path / "invalid.npy"
@@ -97,6 +211,21 @@ def test_vq_token_cache_schema_and_corruption(tmp_path: Path):
         load_vq_tokens(invalid)
     with pytest.raises(ValueError, match="Invalid VQ token cache"):
         load_vq_tokens(corrupt)
+
+
+def test_manifest_cache_validation_is_per_row_not_global_count(tmp_path: Path):
+    edge = tmp_path / "edge.png"
+    token = tmp_path / "token.npy"
+    cv2.imwrite(str(edge), np.full((8, 8), 255, dtype=np.uint8))
+    np.save(token, np.arange(1024, dtype=np.int64), allow_pickle=False)
+    manifest = tmp_path / "manifest.jsonl"
+    row = {"sample_id": "coco:one", "dataset": "coco", "edge_path": str(edge), "token_path": str(token)}
+    manifest.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    report = validate_manifest_caches(manifest)
+    assert report["valid"] and report["rows"] == 1 and report["datasets"] == {"coco": 1}
+    token.write_bytes(b"corrupt")
+    report = validate_manifest_caches(manifest)
+    assert not report["valid"] and len(report["errors"]) == 1
 
 
 def test_real_sketchinpainter_adapter_shapes_and_reproducibility(tmp_path: Path):

@@ -9,4 +9,4 @@ RUN_NAME="${RUN_NAME:-pddp_sketchinpainter_finetuned}"
 
 cd "${PROJECT_ROOT}"
 export CUDA_VISIBLE_DEVICES=0
-python scripts/sketchinpainter/batch_inference.py --canonical-conditions "${CANONICAL}" --config configs/sketchinpainter_finetune.yaml --checkpoint "${CHECKPOINT}" --output-root "${OUTPUT_ROOT}/inference/${RUN_NAME}" --device cuda:0 --verify-hashes --execute "$@"
+python scripts/sketchinpainter/batch_inference.py --canonical-conditions "${CANONICAL}" --config configs/sketchinpainter_finetune.yaml --checkpoint "${CHECKPOINT}" --output-root "${OUTPUT_ROOT}/inference/${RUN_NAME}" --device cuda:0 --sketch-scope bbox_crop --bbox-scale 1.2 --verify-hashes --execute "$@"

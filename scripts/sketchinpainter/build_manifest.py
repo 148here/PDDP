@@ -1,4 +1,4 @@
-"""Build a collision-safe ArtBench/Mural1 manifest for PDDP adaptation."""
+"""Build a collision-safe ArtBench/COCO/Mural1 training manifest."""
 
 from __future__ import annotations
 
@@ -19,6 +19,8 @@ def iter_images(dataset: str, root: Path):
     for path in sorted(root.rglob("*")):
         if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS and path.parent.name == "images":
             rel_key = path.relative_to(root).as_posix()
+            if any(part.lower() == "test" for part in Path(rel_key).parts):
+                continue
             yield dataset, rel_key, path.resolve()
 
 
@@ -46,6 +48,7 @@ def training_root(root: Path) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--artbench-root", type=Path, required=True)
+    parser.add_argument("--coco-root", type=Path, required=True)
     parser.add_argument("--mural1-root", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
@@ -54,14 +57,19 @@ def main() -> None:
     args = parser.parse_args()
     if not 0 < args.validation_percent < 50:
         raise ValueError("validation-percent must be in (0, 50)")
-    roots = {"artbench": args.artbench_root.resolve(), "mural1": args.mural1_root.resolve()}
+    roots = {
+        "artbench": args.artbench_root.resolve(),
+        "coco": args.coco_root.resolve(),
+        "mural1": args.mural1_root.resolve(),
+    }
     for name, root in roots.items():
         if not root.is_dir():
             raise FileNotFoundError(f"Missing {name} root: {root}")
     scan_roots = {name: training_root(root) for name, root in roots.items()}
     rows = [
-        *build_rows("artbench", scan_roots["artbench"], args.output_root, args.validation_percent),
-        *build_rows("mural1", scan_roots["mural1"], args.output_root, args.validation_percent),
+        row
+        for name in ("artbench", "coco", "mural1")
+        for row in build_rows(name, scan_roots[name], args.output_root, args.validation_percent)
     ]
     ids = [row["sample_id"] for row in rows]
     if len(ids) != len(set(ids)):

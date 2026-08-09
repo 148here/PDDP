@@ -13,15 +13,14 @@ class ClipGradNorm(object):
         self.last_epoch = -1
 
 
-    def __call__(self, parameters):
-        self.last_epoch += 1
-        clip = False
-        if self.last_epoch >= self.start_iteration:
-            clip = True
-        if self.end_iteration > 0 and self.last_epoch < self.end_iteration:
-            clip = True 
+    def __call__(self, parameters, step=None):
+        self.last_epoch = self.last_epoch + 1 if step is None else int(step)
+        clip = self.last_epoch >= self.start_iteration and (
+            self.end_iteration < 0 or self.last_epoch < self.end_iteration
+        )
         if clip:
             clip_grad_norm_(parameters, max_norm=self.max_norm)
+        return clip
 
     def state_dict(self):
         return {key: value for key, value in self.__dict__.items()}

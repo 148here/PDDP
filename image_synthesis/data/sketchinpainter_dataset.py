@@ -129,6 +129,67 @@ def crop_and_pad_sketch(
     return cv2.cvtColor(canvas, cv2.COLOR_GRAY2RGB)
 
 
+def expanded_mask_bbox(hole_mask: np.ndarray, *, bbox_scale: float = 1.2) -> tuple[int, int, int, int]:
+    """Return a clipped, exclusive-end bbox around all nonzero mask pixels."""
+    if bbox_scale <= 0:
+        raise ValueError("bbox_scale must be positive")
+    if hole_mask.ndim != 2:
+        raise ValueError(f"hole_mask must be 2D, got shape {hole_mask.shape}")
+    ys, xs = np.where(hole_mask > 0)
+    if xs.size == 0:
+        raise ValueError("hole_mask is empty")
+    source_x0, source_x1 = int(xs.min()), int(xs.max()) + 1
+    source_y0, source_y1 = int(ys.min()), int(ys.max()) + 1
+    width = max(1, int(round((source_x1 - source_x0) * bbox_scale)))
+    height = max(1, int(round((source_y1 - source_y0) * bbox_scale)))
+    center_x = (source_x0 + source_x1) / 2.0
+    center_y = (source_y0 + source_y1) / 2.0
+    x0 = max(0, int(round(center_x - width / 2.0)))
+    y0 = max(0, int(round(center_y - height / 2.0)))
+    x1 = min(hole_mask.shape[1], int(round(center_x + width / 2.0)))
+    y1 = min(hole_mask.shape[0], int(round(center_y + height / 2.0)))
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError(f"expanded mask bbox is empty: {(x0, y0, x1, y1)}")
+    return x0, y0, x1, y1
+
+
+def _pad_sketch_crop(crop: np.ndarray, *, output_size: int) -> np.ndarray:
+    if output_size <= 0:
+        raise ValueError("output_size must be positive")
+    if crop.size == 0:
+        raise ValueError("sketch crop is empty")
+    scale = min(output_size / crop.shape[1], output_size / crop.shape[0])
+    new_w = max(1, int(round(crop.shape[1] * scale)))
+    new_h = max(1, int(round(crop.shape[0] * scale)))
+    interpolation = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
+    resized = cv2.resize(crop, (new_w, new_h), interpolation=interpolation)
+    canvas = np.full((output_size, output_size), 255, dtype=np.uint8)
+    xoff, yoff = (output_size - new_w) // 2, (output_size - new_h) // 2
+    canvas[yoff:yoff + new_h, xoff:xoff + new_w] = resized
+    return cv2.cvtColor(canvas, cv2.COLOR_GRAY2RGB)
+
+
+def bbox_crop_and_pad_sketch(
+    sketch: np.ndarray,
+    hole_mask: np.ndarray,
+    *,
+    output_size: int = 224,
+    bbox_scale: float = 1.2,
+) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+    """Crop every sketch line in the expanded mask bbox, then aspect-pad white.
+
+    The free-form mask is used only to locate the crop.  Lines inside the crop
+    are deliberately retained even when they lie outside the mask itself.
+    """
+    if sketch.ndim == 3:
+        sketch = cv2.cvtColor(sketch, cv2.COLOR_BGR2GRAY)
+    if sketch.shape != hole_mask.shape:
+        sketch = cv2.resize(sketch, (hole_mask.shape[1], hole_mask.shape[0]), interpolation=cv2.INTER_LINEAR)
+    bbox = expanded_mask_bbox(hole_mask, bbox_scale=bbox_scale)
+    x0, y0, x1, y1 = bbox
+    return _pad_sketch_crop(sketch[y0:y1, x0:x1], output_size=output_size), bbox
+
+
 def resize_full_sketch(sketch: np.ndarray, *, output_size: int = 224) -> np.ndarray:
     """Preserve the complete canonical sketch and only satisfy PDDP's input size."""
     if sketch.ndim == 3:
@@ -136,6 +197,37 @@ def resize_full_sketch(sketch: np.ndarray, *, output_size: int = 224) -> np.ndar
     interpolation = cv2.INTER_AREA if max(sketch.shape) > output_size else cv2.INTER_LINEAR
     resized = cv2.resize(sketch, (output_size, output_size), interpolation=interpolation)
     return cv2.cvtColor(resized, cv2.COLOR_GRAY2RGB)
+
+
+def prepare_pddp_sketch(
+    sketch: np.ndarray,
+    hole_mask: np.ndarray,
+    *,
+    scope: str,
+    output_size: int = 224,
+    bbox_scale: float = 1.2,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Single training/inference entry point for all supported sketch scopes."""
+    normalized_scope = str(scope).strip().lower()
+    if normalized_scope == "full":
+        value = resize_full_sketch(sketch, output_size=output_size)
+        bbox = None
+    elif normalized_scope == "hole_crop":
+        value = crop_and_pad_sketch(sketch, hole_mask, output_size=output_size, bbox_scale=bbox_scale)
+        bbox = expanded_mask_bbox(hole_mask, bbox_scale=bbox_scale)
+    elif normalized_scope == "bbox_crop":
+        value, bbox = bbox_crop_and_pad_sketch(
+            sketch, hole_mask, output_size=output_size, bbox_scale=bbox_scale
+        )
+    else:
+        raise ValueError("sketch scope must be one of: bbox_crop, full, hole_crop")
+    return value, {
+        "scope": normalized_scope,
+        "bbox_scale": float(bbox_scale),
+        "crop_bbox_xyxy": list(bbox) if bbox is not None else None,
+        "source_size_hw": [int(hole_mask.shape[0]), int(hole_mask.shape[1])],
+        "output_size_hw": [int(output_size), int(output_size)],
+    }
 
 
 class SketchInpainterPDDPDataset(Dataset):
@@ -155,7 +247,7 @@ class SketchInpainterPDDPDataset(Dataset):
         image_size: list[int] | tuple[int, int] = (256, 256),
         sketch_size: list[int] | tuple[int, int] = (224, 224),
         bbox_scale: float = 1.2,
-        sketch_scope: str = "full",
+        sketch_scope: str = "bbox_crop",
         sketch_overrides: dict[str, Any] | None = None,
         validate_files: bool = True,
         **_: Any,
@@ -172,14 +264,15 @@ class SketchInpainterPDDPDataset(Dataset):
             raise FileNotFoundError(f"No mask images found under: {mask_dirs}")
         self.sketchinpainter_root = Path(sketchinpainter_root).resolve()
         self.global_seed = int(global_seed)
-        self.epoch = 0
+        # Shared tensor stays visible in already-running persistent workers.
+        self._epoch = torch.zeros((), dtype=torch.int64).share_memory_()
         self.image_size = tuple(int(value) for value in image_size)
         self.sketch_size = tuple(int(value) for value in sketch_size)
         self.bbox_scale = float(bbox_scale)
         self.sketch_scope = str(sketch_scope).strip().lower()
-        if self.sketch_scope not in {"full", "hole_crop"}:
-            raise ValueError("sketch_scope must be 'full' or 'hole_crop'")
-        self.weights = {"artbench": 1.0, "mural1": 0.1, **(dataset_weights or {})}
+        if self.sketch_scope not in {"bbox_crop", "full", "hole_crop"}:
+            raise ValueError("sketch_scope must be one of: bbox_crop, full, hole_crop")
+        self.weights = {"artbench": 1.0, "coco": 0.43369, "mural1": 0.1, **(dataset_weights or {})}
         self.mask_count_probs = {int(key): float(value) for key, value in (mask_count_probs or {1: 0.5, 2: 0.5}).items()}
         self.random_mask_rotate_90 = bool(random_mask_rotate_90)
         self.sketch_overrides = dict(sketch_overrides or {})
@@ -196,7 +289,11 @@ class SketchInpainterPDDPDataset(Dataset):
                         raise FileNotFoundError(f"Missing {key} for {row['sample_id']}: {row[key]}")
 
     def set_epoch(self, epoch: int) -> None:
-        self.epoch = int(epoch)
+        self._epoch.fill_(int(epoch))
+
+    @property
+    def epoch(self) -> int:
+        return int(self._epoch.item())
 
     def __len__(self) -> int:
         return self.effective_length
@@ -241,12 +338,13 @@ class SketchInpainterPDDPDataset(Dataset):
             boundary_pin_px=12.0,
             **self.sketch_overrides,
         )
-        if self.sketch_scope == "full":
-            pddp_sketch = resize_full_sketch(sketch, output_size=self.sketch_size[0])
-        else:
-            pddp_sketch = crop_and_pad_sketch(
-                sketch, mask, output_size=self.sketch_size[0], bbox_scale=self.bbox_scale
-            )
+        pddp_sketch, sketch_preprocessing = prepare_pddp_sketch(
+            sketch,
+            mask,
+            scope=self.sketch_scope,
+            output_size=self.sketch_size[0],
+            bbox_scale=self.bbox_scale,
+        )
         tokens = load_vq_tokens(row["token_path"])
         return {
             "image": np.asarray(image, dtype=np.float32).transpose(2, 0, 1),
@@ -260,4 +358,5 @@ class SketchInpainterPDDPDataset(Dataset):
             "mask_paths": "|".join(mask_paths),
             # Strings keep default DataLoader collation valid when mask_count is 1 or 2.
             "mask_rotations": "|".join(str(value) for value in rotations),
+            "sketch_preprocessing": json.dumps(sketch_preprocessing, sort_keys=True),
         }

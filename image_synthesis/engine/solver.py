@@ -34,6 +34,56 @@ except:
 STEP_WITH_LOSS_SCHEDULERS = (ReduceLROnPlateauWithWarmup, ReduceLROnPlateau)
 
 
+def optimizer_step_boundary(iteration, *, step_iteration, accumulate_grad_iters):
+    """Whether this micro-step is both active and an optimizer boundary."""
+    current = int(iteration) + 1
+    return (
+        int(step_iteration) > 0
+        and current % int(step_iteration) == 0
+        and current % int(accumulate_grad_iters) == 0
+    )
+
+
+def _critical_model_key_mismatches(keys):
+    """Only the separately loaded VQ module may be absent from PDDP weights."""
+    return [key for key in keys if not key.startswith('content_codec.vq.')]
+
+
+def initialize_pretrained_weights(model, ema_tracker, state_dict):
+    """Initialize a fresh fine-tune from official base + EMA weights only."""
+    if 'model' not in state_dict:
+        raise KeyError("Pretrained checkpoint has no 'model' state")
+    if 'ema' not in state_dict:
+        raise KeyError("Pretrained checkpoint has no 'ema' transformer state")
+    missing, unexpected = model.load_state_dict(state_dict['model'], strict=False)
+    critical_missing = _critical_model_key_mismatches(list(missing))
+    critical_unexpected = _critical_model_key_mismatches(list(unexpected))
+    if critical_missing or critical_unexpected:
+        raise RuntimeError(
+            'Critical pretrained model key mismatch: missing={} unexpected={}'.format(
+                critical_missing, critical_unexpected
+            )
+        )
+    if not hasattr(model, 'get_ema_model') or not callable(model.get_ema_model):
+        raise TypeError('Model does not expose get_ema_model() for official EMA initialization')
+    ema_missing, ema_unexpected = model.get_ema_model().load_state_dict(state_dict['ema'], strict=False)
+    if ema_missing or ema_unexpected:
+        raise RuntimeError(
+            'Critical pretrained EMA key mismatch: missing={} unexpected={}'.format(
+                list(ema_missing), list(ema_unexpected)
+            )
+        )
+    if ema_tracker is not None:
+        ema_tracker.load_state_dict(state_dict['ema'], strict=True)
+    return {
+        'model_missing_keys': list(missing),
+        'model_unexpected_keys': list(unexpected),
+        'ema_missing_keys': list(ema_missing),
+        'ema_unexpected_keys': list(ema_unexpected),
+        'training_state_loaded': False,
+    }
+
+
 class Solver(object):
     def __init__(self, config, args, model, dataloader, logger):
         self.config = config
@@ -237,6 +287,8 @@ class Solver(object):
 
     def step(self, batch, phase='train'):
         loss = {}
+        optimizer_stepped = False
+        amp_optimizer_stepped = False
         if self.debug == False: 
             for k, v in batch.items():
                 if torch.is_tensor(v):
@@ -281,38 +333,60 @@ class Solver(object):
                         output = self.model(**input)
             
             if phase == 'train':
-                if op_sc['optimizer']['step_iteration'] > 0 and (self.last_iter + 1) % op_sc['optimizer']['step_iteration'] == 0:
+                step_iteration = op_sc['optimizer']['step_iteration']
+                optimizer_iteration = step_iteration > 0 and (self.last_iter + 1) % step_iteration == 0
+                if optimizer_iteration:
                     if self.args.amp:
                         self.scaler.scale(output['loss']).backward()
-                        if self.clip_grad_norm is not None:
-                            self.clip_grad_norm(self.model.parameters())
-                        if (self.last_iter + 1) % self.config['solver']['accumulate_grad_iters'] == 0:
+                        if optimizer_step_boundary(
+                            self.last_iter,
+                            step_iteration=step_iteration,
+                            accumulate_grad_iters=self.config['solver']['accumulate_grad_iters'],
+                        ):
+                            self.scaler.unscale_(op_sc['optimizer']['module'])
+                            if self.clip_grad_norm is not None:
+                                self.clip_grad_norm(self.model.parameters(), step=self.last_iter)
                             self.scaler.step(op_sc['optimizer']['module'])
-                            self.scaler.update()
+                            amp_optimizer_stepped = True
+                            optimizer_stepped = True
                     else:
                         output['loss'].backward()
-                        if self.clip_grad_norm is not None:
-                            self.clip_grad_norm(self.model.parameters())
-                        if (self.last_iter + 1) % self.config['solver']['accumulate_grad_iters'] == 0:
+                        if optimizer_step_boundary(
+                            self.last_iter,
+                            step_iteration=step_iteration,
+                            accumulate_grad_iters=self.config['solver']['accumulate_grad_iters'],
+                        ):
+                            if self.clip_grad_norm is not None:
+                                self.clip_grad_norm(self.model.parameters(), step=self.last_iter)
                             op_sc['optimizer']['module'].step()
+                            optimizer_stepped = True
 
-                    if (self.last_iter + 1) % self.config['solver']['accumulate_grad_iters'] == 0:
+                    if optimizer_step_boundary(
+                        self.last_iter,
+                        step_iteration=step_iteration,
+                        accumulate_grad_iters=self.config['solver']['accumulate_grad_iters'],
+                    ):
                         op_sc['optimizer']['module'].zero_grad()
 
                     
                 if 'scheduler' in op_sc:
                     if op_sc['scheduler']['step_iteration'] > 0 and (self.last_iter + 1) % op_sc['scheduler']['step_iteration'] == 0:
-                        if (self.last_iter + 1) % self.config['solver']['accumulate_grad_iters'] == 0:
+                        if optimizer_step_boundary(
+                            self.last_iter,
+                            step_iteration=step_iteration,
+                            accumulate_grad_iters=self.config['solver']['accumulate_grad_iters'],
+                        ):
 
                             if isinstance(op_sc['scheduler']['module'], STEP_WITH_LOSS_SCHEDULERS):
                                 op_sc['scheduler']['module'].step(output.get('loss'))
                             else:
                                 op_sc['scheduler']['module'].step()
-                # update ema model
-                if self.ema is not None:
-                    self.ema.update(iteration=self.last_iter)
-
             loss[op_sc_n] = {k: v for k, v in output.items() if ('loss' in k or 'acc' in k)}
+        if phase == 'train':
+            if amp_optimizer_stepped:
+                self.scaler.update()
+            if optimizer_stepped and self.ema is not None:
+                self.ema.update(iteration=self.last_iter)
         return loss
 
     def save(self, force=False):
@@ -370,6 +444,16 @@ class Solver(object):
                 self.last_saved_iter = self.last_iter
                 self.logger.log_info('saved in {}'.format(save_path))    
         
+    def load_pretrained(self, path):
+        """Load official weights without inheriting any training progress/state."""
+        if not os.path.exists(path):
+            raise FileNotFoundError(path)
+        state_dict = torch.load(path, map_location='cuda:{}'.format(self.args.local_rank))
+        model = self.model.module if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) else self.model
+        audit = initialize_pretrained_weights(model, self.ema, state_dict)
+        self.logger.log_info('Initialized pretrained weights from {}: {}'.format(path, audit))
+        return audit
+
     def resume(self, 
                path=None, # The path of last.pth
                load_optimizer_and_scheduler=True, # whether to load optimizers and scheduler
@@ -385,38 +469,26 @@ class Solver(object):
                 self.last_epoch = state_dict['last_epoch']
                 self.last_iter = state_dict['last_iter']
             
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
-                try:
-                    self.model.module.load_state_dict(state_dict['model'])
-                except:
-                    model_dict = self.model.module.state_dict()
-                    temp_state_dict = {k:v for k,v in state_dict['model'].items() if k in model_dict.keys()}
-                    model_dict.update(temp_state_dict)
-                    self.model.module.load_state_dict(model_dict)
-            else:
-                try:
-                    self.model.load_state_dict(state_dict['model'])
-                except RuntimeError as re:
-                    print(re)
-                    print('-'*100)
-                    print('This might be caused because lpips model was not found in the checkpoint. Continuing....')
-                    self.model.load_state_dict(state_dict['model'], strict=False)
+            model = self.model.module if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) else self.model
+            missing, unexpected = model.load_state_dict(state_dict['model'], strict=False)
+            critical_missing = _critical_model_key_mismatches(list(missing))
+            critical_unexpected = _critical_model_key_mismatches(list(unexpected))
+            if critical_missing or critical_unexpected:
+                raise RuntimeError(
+                    'Critical resume model key mismatch: missing={} unexpected={}'.format(
+                        critical_missing, critical_unexpected
+                    )
+                )
 
 
-            if 'ema' in state_dict and self.ema is not None:
-                try:
-                    self.ema.load_state_dict(state_dict['ema'])
-                except:
-                    model_dict = self.ema.state_dict()
-                    temp_state_dict = {k:v for k,v in state_dict['ema'].items() if k in model_dict.keys()}
-                    model_dict.update(temp_state_dict)
-                    self.ema.load_state_dict(model_dict)
+            if load_others and 'ema' in state_dict and self.ema is not None:
+                self.ema.load_state_dict(state_dict['ema'], strict=True)
 
-            if 'clip_grad_norm' in state_dict and self.clip_grad_norm is not None:
+            if load_others and 'clip_grad_norm' in state_dict and self.clip_grad_norm is not None:
                 self.clip_grad_norm.load_state_dict(state_dict['clip_grad_norm'])
 
             # handle optimizer and scheduler
-            for op_sc_n, op_sc in state_dict['optimizer_and_scheduler'].items():
+            for op_sc_n, op_sc in state_dict.get('optimizer_and_scheduler', {}).items():
                 for k in op_sc:
                     if k in ['optimizer', 'scheduler']:
                         for kk in op_sc[k]:

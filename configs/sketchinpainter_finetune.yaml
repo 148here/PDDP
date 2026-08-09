@@ -64,8 +64,8 @@ model:
 solver:
   base_lr: 4.0e-6
   adjust_lr: none
-  max_epochs: 250
-  max_iterations: 6364
+  max_epochs: 4
+  max_iterations: -1
   save_iterations: 1000
   keep_only_last_checkpoint: true
   save_epochs: 2
@@ -85,7 +85,7 @@ solver:
 
 dataloader:
   data_root: ''
-  batch_size: 8
+  batch_size: 16
   num_workers: 8
   persistent_workers: true
   train_datasets:
@@ -96,13 +96,13 @@ dataloader:
         sketchinpainter_root: /cpfs01/projects-SSD/cfff-27504eab520e_SSD/zwz_42312/yza/SketchInpainter
         phase: train
         global_seed: 20260425
-        dataset_weights: {artbench: 1.0, mural1: 0.1}
+        dataset_weights: {artbench: 1.0, coco: 0.43369, mural1: 0.1}
         mask_count_probs: {1: 0.5, 2: 0.5}
         random_mask_rotate_90: true
         image_size: [256, 256]
         sketch_size: [224, 224]
         bbox_scale: 1.2
-        sketch_scope: full
+        sketch_scope: bbox_crop
         sketch_overrides:
           sigma_mean: 9.1
           sigma_std: 1.82
